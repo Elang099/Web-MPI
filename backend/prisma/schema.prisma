@@ -1,0 +1,845 @@
+// FUTURE ENGLISH CENTER — Prisma schema (PostgreSQL)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/* ============================== ENUMS ============================== */
+
+enum Role {
+  STUDENT
+  TEACHER
+  ADMIN
+}
+
+enum Level {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum Category {
+  GRAMMAR
+  VOCABULARY
+  READING
+  WRITING
+  LISTENING
+  SPEAKING
+  PRONUNCIATION
+  TEXT_TYPES
+  VOCATIONAL
+}
+
+enum Skill {
+  VOCABULARY
+  GRAMMAR
+  READING
+  WRITING
+  LISTENING
+  SPEAKING
+  PRONUNCIATION
+}
+
+enum QuestionType {
+  MCQ
+  FILL
+  ORDER
+  MATCH
+  TRUE_FALSE
+  LISTEN
+}
+
+enum ProgressStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum GameSessionStatus {
+  ACTIVE
+  COMPLETED
+  ABANDONED
+  REJECTED
+}
+
+enum CosmeticType {
+  HAIR
+  OUTFIT
+  ACCESSORY
+  SHOES
+  SKIN
+  EFFECT
+}
+
+enum Rarity {
+  COMMON
+  RARE
+  EPIC
+  LEGENDARY
+}
+
+enum MissionPeriod {
+  DAILY
+  WEEKLY
+}
+
+enum AssessmentType {
+  PLACEMENT
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+  SKILL
+  FINAL
+  CAREER
+}
+
+enum PostType {
+  TEXT
+  MILESTONE
+  ACHIEVEMENT
+}
+
+enum ReportStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
+/* ============================ USERS & AUTH ============================ */
+
+/// Role metadata (permissions are enforced in code by the `Role` enum on User).
+model RoleDefinition {
+  role        Role     @id
+  label       String
+  description String
+  permissions String[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  username     String   @unique
+  displayName  String
+  passwordHash String
+  role         Role     @default(STUDENT)
+  isBanned     Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  lastLoginAt  DateTime?
+
+  profile        Profile?
+  settings       UserSettings?
+  stats          PlayerStats?
+  avatar         Avatar?
+  cityState      CityState?
+  sessions       AuthSession[]
+  resetTokens    PasswordResetToken[]
+  lessonProgress LessonProgress[]
+  attempts       ExerciseAttempt[]
+  skillMastery   SkillMastery[]
+  vocabMastery   VocabMastery[]
+  activities     LearningActivity[]
+  enrollments    PathEnrollment[]
+  gameSessions   GameSession[]
+  gameProgress   GameProgress[]
+  inventory      InventoryItem[]
+  rewards        Reward[]
+  xpTransactions XpTransaction[]
+  achievements   UserAchievement[]
+  missions       UserMission[]
+  leaderboard    LeaderboardEntry[]
+  conversations  AiConversation[]
+  assessmentAttempts AssessmentAttempt[]
+  careerReports  CareerReport[]
+  certificates   Certificate[]
+  notifications  Notification[]
+  posts          CommunityPost[]
+  reactions      PostReaction[]
+  reports        ContentReport[]
+  challengeEntries ChallengeEntry[]
+  announcements  Announcement[]
+  auditLogs      AuditLog[]
+}
+
+model Profile {
+  id          String  @id @default(cuid())
+  userId      String  @unique
+  user        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bio         String?
+  audience    String  @default("GENERAL") // SMP | SMA | SMK | GENERAL
+  cefr        String? // A1..C2 (set by placement test)
+  goal        String?
+  careerField String?
+  isPublic    Boolean @default(true)
+}
+
+model UserSettings {
+  id                 String  @id @default(cuid())
+  userId             String  @unique
+  user               User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  theme              String  @default("dark")
+  dailyGoalXp        Int     @default(50)
+  soundVolume        Float   @default(0.7)
+  musicVolume        Float   @default(0.4)
+  muted              Boolean @default(false)
+  speechRate         Float   @default(0.95)
+  voiceAccent        String  @default("en-US")
+  emailNotifications Boolean @default(true)
+  pushNotifications  Boolean @default(true)
+  showOnLeaderboard  Boolean @default(true)
+  reducedMotion      Boolean @default(false)
+}
+
+/// Refresh-token sessions (token stored as SHA-256 hash, rotated on every refresh).
+model AuthSession {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String   @unique
+  userAgent  String?
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+}
+
+/// XP / level / coins / streak. Only ever mutated by the server reward service.
+model PlayerStats {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  xp            Int      @default(0)
+  level         Int      @default(1)
+  coins         Int      @default(100)
+  streak        Int      @default(0)
+  longestStreak Int      @default(0)
+  lastActiveDay String?  // YYYY-MM-DD
+  learningMinutes Int    @default(0)
+  updatedAt     DateTime @updatedAt
+}
+
+/* ============================== LEARNING ============================== */
+
+model Topic {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  category    Category
+  title       String
+  description String
+  order       Int      @default(0)
+  lessons     Lesson[]
+
+  @@index([category])
+}
+
+model Lesson {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  topicId     String
+  topic       Topic    @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  title       String
+  summary     String
+  level       Level
+  audiences   String[]
+  durationMin Int      @default(10)
+  xpReward    Int      @default(20)
+  emoji       String?
+  order       Int      @default(0)
+  content     Json     // LessonBlock[] (see shared/src/schemas/learning.ts)
+  isPublished Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  exercises    Exercise[]
+  progress     LessonProgress[]
+  pathSteps    LearningPathStep[]
+  grammarRules GrammarRule[]
+
+  @@index([topicId])
+}
+
+model LearningPath {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  title       String
+  description String
+  level       Level
+  audience    String   @default("GENERAL")
+  color       String   @default("#00D1FF")
+  icon        String   @default("Route")
+  order       Int      @default(0)
+  steps       LearningPathStep[]
+  enrollments PathEnrollment[]
+}
+
+model LearningPathStep {
+  id       String       @id @default(cuid())
+  pathId   String
+  path     LearningPath @relation(fields: [pathId], references: [id], onDelete: Cascade)
+  lessonId String
+  lesson   Lesson       @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  order    Int
+  unit     String       @default("Unit 1")
+
+  @@unique([pathId, lessonId])
+}
+
+model PathEnrollment {
+  id        String       @id @default(cuid())
+  userId    String
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pathId    String
+  path      LearningPath @relation(fields: [pathId], references: [id], onDelete: Cascade)
+  createdAt DateTime     @default(now())
+
+  @@unique([userId, pathId])
+}
+
+model Vocabulary {
+  id           String   @id @default(cuid())
+  word         String
+  phonetic     String?
+  partOfSpeech String
+  meaning      String
+  example      String?
+  category     String   // daily, academic, school, workplace, business, technology, travel, food, phrasal, idiom, ...
+  level        Level    @default(BEGINNER)
+  synonyms     String[]
+  antonyms     String[]
+  emoji        String?
+  mastery      VocabMastery[]
+
+  @@unique([word, category])
+  @@index([category])
+}
+
+model GrammarRule {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  title       String
+  formula     String
+  explanation String
+  examples    String[]
+  level       Level
+  lessonId    String?
+  lesson      Lesson?  @relation(fields: [lessonId], references: [id], onDelete: SetNull)
+}
+
+model Exercise {
+  id          String   @id @default(cuid())
+  lessonId    String?
+  lesson      Lesson?  @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  title       String
+  skill       Skill
+  questions   Question[]
+  attempts    ExerciseAttempt[]
+  createdAt   DateTime @default(now())
+}
+
+/// Questions power lesson exercises, assessments and game challenges.
+model Question {
+  id           String       @id @default(cuid())
+  exerciseId   String?
+  exercise     Exercise?    @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+  assessmentId String?
+  assessment   Assessment?  @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  gameSlug     String?      // when set, question is part of a game's question bank
+  type         QuestionType
+  prompt       String
+  data         Json         @default("{}")
+  answer       Json         // string | string[] — never sent to clients before grading
+  explanation  String
+  skill        Skill        @default(GRAMMAR)
+  level        Level        @default(BEGINNER)
+  tags         String[]
+  order        Int          @default(0)
+  answers      AttemptAnswer[]
+
+  @@index([exerciseId])
+  @@index([assessmentId])
+  @@index([gameSlug])
+}
+
+model ExerciseAttempt {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exerciseId  String
+  exercise    Exercise @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+  score       Int
+  total       Int
+  timeSpentSec Int     @default(0)
+  createdAt   DateTime @default(now())
+  answers     AttemptAnswer[]
+
+  @@index([userId])
+}
+
+/// Individual graded answers (exercises). `Answers` in the data model.
+model AttemptAnswer {
+  id         String          @id @default(cuid())
+  attemptId  String
+  attempt    ExerciseAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  questionId String
+  question   Question        @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  response   Json
+  isCorrect  Boolean
+}
+
+model LessonProgress {
+  id           String         @id @default(cuid())
+  userId       String
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lessonId     String
+  lesson       Lesson         @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  status       ProgressStatus @default(IN_PROGRESS)
+  bestScore    Int            @default(0) // percent
+  timeSpentSec Int            @default(0)
+  startedAt    DateTime       @default(now())
+  completedAt  DateTime?
+  updatedAt    DateTime       @updatedAt
+
+  @@unique([userId, lessonId])
+  @@index([userId])
+}
+
+model SkillMastery {
+  id       String @id @default(cuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  skill    Skill
+  correct  Int    @default(0)
+  attempts Int    @default(0)
+  activities Int  @default(0) // e.g. speaking/writing practice count
+
+  @@unique([userId, skill])
+}
+
+model VocabMastery {
+  id           String     @id @default(cuid())
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vocabularyId String
+  vocabulary   Vocabulary @relation(fields: [vocabularyId], references: [id], onDelete: Cascade)
+  strength     Int        @default(0) // 0..5 (spaced repetition box)
+  seen         Int        @default(0)
+  lastReviewed DateTime   @default(now())
+
+  @@unique([userId, vocabularyId])
+}
+
+/// Activity feed + learning time log.
+model LearningActivity {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String   // LESSON_COMPLETED, EXERCISE, GAME, ASSESSMENT, AI_TUTOR, SPEAKING, WRITING, ACHIEVEMENT
+  title     String
+  refId     String?
+  skill     Skill?
+  minutes   Int      @default(0)
+  xp        Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+/* =============================== GAMES =============================== */
+
+model GameSession {
+  id           String            @id @default(cuid())
+  userId       String
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gameSlug     String
+  mode         String?
+  status       GameSessionStatus @default(ACTIVE)
+  questionIds  String[]          // questions issued by the server for this session
+  startedAt    DateTime          @default(now())
+  endedAt      DateTime?
+  score        Int               @default(0)
+  distance     Int               @default(0)
+  coinsCollected Int             @default(0)
+  correct      Int               @default(0)
+  wrong        Int               @default(0)
+  xpAwarded    Int               @default(0)
+  coinsAwarded Int               @default(0)
+  meta         Json?
+  flagReason   String?
+
+  @@index([userId, gameSlug])
+}
+
+model GameProgress {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gameSlug   String
+  highScore  Int      @default(0)
+  bestDistance Int    @default(0)
+  totalPlays Int      @default(0)
+  totalCorrect Int    @default(0)
+  level      Int      @default(1)
+  data       Json     @default("{}") // e.g. adventure unlocked chapters, puzzle stars, sim scenes completed
+  updatedAt  DateTime @updatedAt
+
+  @@unique([userId, gameSlug])
+}
+
+/// City Builder — resources/buildings are server-authoritative.
+model CityState {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String   @default("My English City")
+  bricks    Int      @default(50)
+  wood      Int      @default(50)
+  books     Int      @default(10)
+  energy    Int      @default(20)
+  population Int     @default(0)
+  buildings Json     @default("[]") // [{id,type,x,y,level}]
+  updatedAt DateTime @updatedAt
+}
+
+model Avatar {
+  id         String  @id @default(cuid())
+  userId     String  @unique
+  user       User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String  @default("Runner")
+  skinTone   String  @default("#F1C27D")
+  hairStyle  String  @default("hair-short")
+  hairColor  String  @default("#2B1B12")
+  outfit     String  @default("outfit-hoodie-cyan")
+  accessory  String?
+  shoes      String  @default("shoes-sneakers")
+  effect     String?
+  expression String  @default("happy")
+  updatedAt  DateTime @updatedAt
+}
+
+model CosmeticItem {
+  id          String       @id @default(cuid())
+  slug        String       @unique
+  name        String
+  type        CosmeticType
+  rarity      Rarity       @default(COMMON)
+  priceCoins  Int          @default(0)
+  unlockLevel Int          @default(1)
+  achievementSlug String?  // unlocked by earning this achievement (not purchasable)
+  color       String?
+  isDefault   Boolean      @default(false)
+  inventory   InventoryItem[]
+}
+
+model InventoryItem {
+  id         String       @id @default(cuid())
+  userId     String
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  itemId     String
+  item       CosmeticItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  source     String       @default("purchase") // purchase | achievement | level | default
+  acquiredAt DateTime     @default(now())
+
+  @@unique([userId, itemId])
+}
+
+/* ============================ PROGRESSION ============================ */
+
+/// Every XP/coin change. `sourceKey` is unique per user → duplicate claims are impossible.
+model XpTransaction {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amount    Int
+  coins     Int      @default(0)
+  source    String   // LESSON, EXERCISE, GAME, MISSION, ACHIEVEMENT, ASSESSMENT, PURCHASE, ADMIN, CITY
+  sourceKey String
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@unique([userId, sourceKey])
+  @@index([userId, createdAt])
+}
+
+/// Non-XP rewards granted to a user (items, badges, resources).
+model Reward {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String   // ITEM | BADGE | RESOURCES | COINS
+  label     String
+  payload   Json     @default("{}")
+  sourceKey String
+  createdAt DateTime @default(now())
+
+  @@unique([userId, sourceKey])
+}
+
+model Achievement {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  title       String
+  description String
+  icon        String   @default("Award")
+  category    String   @default("learning") // learning | games | streak | social | mastery
+  metric      String   // lessons_completed, xp_total, streak_days, games_played, perfect_exercises, ...
+  threshold   Int
+  xpReward    Int      @default(0)
+  coinReward  Int      @default(0)
+  itemRewardSlug String?
+  rarity      Rarity   @default(COMMON)
+  users       UserAchievement[]
+}
+
+model UserAchievement {
+  id            String      @id @default(cuid())
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievementId String
+  achievement   Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+  earnedAt      DateTime    @default(now())
+
+  @@unique([userId, achievementId])
+}
+
+model Mission {
+  id          String        @id @default(cuid())
+  slug        String        @unique
+  title       String
+  description String
+  period      MissionPeriod
+  metric      String        // lessons_completed, xp_earned, games_played, correct_answers, game_dash_distance, ...
+  target      Int
+  xpReward    Int           @default(10)
+  coinReward  Int           @default(20)
+  gameSlug    String?       // game-specific missions shown inside a game
+  isActive    Boolean       @default(true)
+  users       UserMission[]
+}
+
+model UserMission {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  missionId   String
+  mission     Mission   @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  periodKey   String    // YYYY-MM-DD or YYYY-Www
+  progress    Int       @default(0)
+  completedAt DateTime?
+  claimedAt   DateTime?
+
+  @@unique([userId, missionId, periodKey])
+}
+
+/// Denormalised leaderboard rows: periodKey = "all" | "2026-W47".
+model LeaderboardEntry {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  periodKey String
+  xp        Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, periodKey])
+  @@index([periodKey, xp])
+}
+
+/* ================================ AI ================================ */
+
+model AiConversation {
+  id        String      @id @default(cuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String      @default("New conversation")
+  mode      String      @default("tutor")
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  messages  AiMessage[]
+
+  @@index([userId])
+}
+
+model AiMessage {
+  id             String         @id @default(cuid())
+  conversationId String
+  conversation   AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String         // user | assistant
+  content        String
+  createdAt      DateTime       @default(now())
+}
+
+/* ============================ ASSESSMENTS ============================ */
+
+model Assessment {
+  id           String         @id @default(cuid())
+  slug         String         @unique
+  title        String
+  description  String
+  type         AssessmentType
+  skill        Skill?
+  careerField  String?
+  timeLimitMin Int            @default(20)
+  passingScore Int            @default(70) // percent
+  order        Int            @default(0)
+  questions    Question[]
+  attempts     AssessmentAttempt[]
+}
+
+model AssessmentAttempt {
+  id           String     @id @default(cuid())
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assessmentId String
+  assessment   Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  score        Int
+  total        Int
+  percent      Int
+  passed       Boolean
+  cefr         String?
+  breakdown    Json       // { [skill]: { correct, total } }
+  createdAt    DateTime   @default(now())
+
+  @@index([userId])
+}
+
+model CareerReport {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  field     String
+  data      Json
+  createdAt DateTime @default(now())
+}
+
+model Certificate {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  code      String   @unique
+  title     String
+  level     String
+  criteria  Json
+  issuedAt  DateTime @default(now())
+  revoked   Boolean  @default(false)
+
+  @@unique([userId, title])
+}
+
+/* ========================= COMMUNITY & COMMS ========================= */
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String    // ACHIEVEMENT, LEVEL_UP, MISSION, ANNOUNCEMENT, STREAK, CHALLENGE, SYSTEM
+  title     String
+  body      String
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model Announcement {
+  id          String   @id @default(cuid())
+  title       String
+  body        String
+  audience    String   @default("ALL")
+  authorId    String?
+  author      User?    @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  isPublished Boolean  @default(true)
+  createdAt   DateTime @default(now())
+}
+
+model Challenge {
+  id          String        @id @default(cuid())
+  slug        String        @unique
+  title       String
+  description String
+  period      MissionPeriod
+  metric      String
+  target      Int
+  xpReward    Int           @default(30)
+  startsAt    DateTime
+  endsAt      DateTime
+  entries     ChallengeEntry[]
+}
+
+model ChallengeEntry {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  challengeId String
+  challenge   Challenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  progress    Int       @default(0)
+  completedAt DateTime?
+  joinedAt    DateTime  @default(now())
+
+  @@unique([userId, challengeId])
+}
+
+model CommunityPost {
+  id        String         @id @default(cuid())
+  userId    String
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      PostType       @default(TEXT)
+  content   String
+  isHidden  Boolean        @default(false)
+  createdAt DateTime       @default(now())
+  reactions PostReaction[]
+  reports   ContentReport[]
+
+  @@index([createdAt])
+}
+
+model PostReaction {
+  id     String        @id @default(cuid())
+  userId String
+  user   User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postId String
+  post   CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  emoji  String
+
+  @@unique([userId, postId, emoji])
+}
+
+model ContentReport {
+  id         String        @id @default(cuid())
+  reporterId String
+  reporter   User          @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+  postId     String
+  post       CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  reason     String
+  status     ReportStatus  @default(OPEN)
+  createdAt  DateTime      @default(now())
+
+  @@unique([reporterId, postId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action    String
+  target    String?
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}

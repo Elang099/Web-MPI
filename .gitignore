@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+!.env.example
+backend/.pglite-data/
+backend/.pglite-test/
+*.log
+coverage/
+.DS_Store
+.vite/

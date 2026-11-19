@@ -1,0 +1,29 @@
+{
+  "name": "future-english-center",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FUTURE ENGLISH CENTER — Master English. Unlock Your Future.",
+  "workspaces": [
+    "shared",
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "db:local": "npm run db:local -w backend",
+    "db:push": "npm run db:push -w backend",
+    "db:seed": "npm run db:seed -w backend",
+    "db:setup": "npm run db:push -w backend && npm run db:seed -w backend",
+    "dev": "concurrently -k -n api,web -c cyan,magenta \"npm run dev -w backend\" \"npm run dev -w frontend\"",
+    "dev:all": "concurrently -k -n db,api,web -c gray,cyan,magenta \"npm run db:local -w backend\" \"npm run dev -w backend\" \"npm run dev -w frontend\"",
+    "build": "npm run build -w backend && npm run build -w frontend",
+    "typecheck": "npm run typecheck -w shared && npm run typecheck -w backend && npm run typecheck -w frontend",
+    "test": "npm run test -w backend && npm run test -w frontend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "~5.6.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
