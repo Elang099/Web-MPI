@@ -79,7 +79,7 @@ function Bootstrap() {
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      <BrowserRouter basename={import.meta.env.BASE_URL}>
         <Bootstrap />
         <Toaster />
         <Routes>

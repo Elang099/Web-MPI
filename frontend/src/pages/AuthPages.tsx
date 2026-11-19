@@ -63,18 +63,56 @@ export function LoginPage() {
         </Button>
       </form>
 
-      {/* Demo Quick-Fill Helper */}
-      <div className="mt-6 rounded-2xl border border-line bg-surface-2/50 p-3.5">
-        <p className="mb-2 text-[11px] font-bold uppercase tracking-wider text-muted">Demo Accounts (Password: Password123!)</p>
-        <div className="flex flex-wrap gap-1.5">
-          <button type="button" onClick={() => quickFill('student@futureenglish.test')} className="chip hover:border-cyan hover:text-cyan">
-            Student
-          </button>
-          <button type="button" onClick={() => quickFill('teacher@futureenglish.test')} className="chip hover:border-cyan hover:text-cyan">
-            Teacher
-          </button>
-          <button type="button" onClick={() => quickFill('admin@futureenglish.test')} className="chip hover:border-cyan hover:text-cyan">
-            Admin
+      {/* Demo Quick-Fill Helper & Instant Guest Access */}
+      <div className="mt-6 rounded-2xl border border-line bg-surface-2/50 p-3.5 space-y-3">
+        <div>
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-wider text-muted">Demo Accounts (Password: Password123!)</p>
+          <div className="flex flex-wrap gap-1.5">
+            <button type="button" onClick={() => quickFill('student@futureenglish.test')} className="chip hover:border-cyan hover:text-cyan">
+              Student
+            </button>
+            <button type="button" onClick={() => quickFill('teacher@futureenglish.test')} className="chip hover:border-cyan hover:text-cyan">
+              Teacher
+            </button>
+            <button type="button" onClick={() => quickFill('admin@futureenglish.test')} className="chip hover:border-cyan hover:text-cyan">
+              Admin
+            </button>
+          </div>
+        </div>
+        <div className="border-t border-line/50 pt-2.5">
+          <button
+            type="button"
+            onClick={() => {
+              setSession('demo-token', {
+                id: 'demo-student-id',
+                email: 'student@futureenglish.test',
+                username: 'alex_learner',
+                displayName: 'Alex Learner',
+                role: 'STUDENT',
+                createdAt: new Date().toISOString(),
+                profile: {
+                  bio: 'Passionate English learner exploring Future English Center.',
+                  audience: 'GENERAL',
+                  cefr: 'B1',
+                  goal: 'Master English for global career',
+                  careerField: 'Technology',
+                  isPublic: true,
+                },
+                stats: {
+                  xp: 1250,
+                  level: 4,
+                  streak: 7,
+                  longestStreak: 12,
+                  coins: 640,
+                  lastActiveDay: new Date().toISOString().slice(0, 10),
+                },
+              });
+              toast.success('Signed in as Alex Learner (Instant Demo)!');
+              navigate('/dashboard');
+            }}
+            className="w-full rounded-xl bg-cyan/15 py-2 text-center text-xs font-bold text-cyan transition hover:bg-cyan/25"
+          >
+            ⚡ Masuk Cepat sebagai Demo Student (Instant Demo)
           </button>
         </div>
       </div>

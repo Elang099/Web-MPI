@@ -3,8 +3,10 @@ import react from '@vitejs/plugin-react';
 import path from 'node:path';
 
 const apiTarget = process.env.VITE_API_TARGET ?? 'http://localhost:4000';
+const base = process.env.BASE_URL ?? (process.env.GITHUB_ACTIONS ? '/Web-MPI/' : '/');
 
 export default defineConfig({
+  base,
   plugins: [react()],
   resolve: {
     alias: { '@': path.resolve(__dirname, 'src') },
