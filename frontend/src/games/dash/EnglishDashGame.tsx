@@ -917,14 +917,14 @@ class EnglishDash3DEngine {
   private step(dt: number) {
     this.runTime += dt;
 
-    // Gentle speed ramp; smoothly slows down when approaching a Question Gate so players can read & think!
+    // Gentle speed ramp; only slows down when actually close to a Question Gate (z >= -28)
     this.baseSpeed = Math.min(0.45, 0.23 + this.distance * 0.0001);
     const approachingGate = this.objects.find((o) => o.kind === 'gate' && !o.hit);
     let targetSpeed = this.baseSpeed;
-    if (this.activeGateQ && approachingGate) {
-      targetSpeed = approachingGate.z > -62 ? 0.088 : 0.14;
+    if (this.activeGateQ && approachingGate && approachingGate.z >= -28) {
+      targetSpeed = 0.095;
     }
-    this.currentSpeed = THREE.MathUtils.lerp(this.currentSpeed, targetSpeed, Math.min(1, dt * 3.5));
+    this.currentSpeed = THREE.MathUtils.lerp(this.currentSpeed, targetSpeed, Math.min(1, dt * 4.5));
 
     const activeSpeed = this.currentSpeed;
     const worldSpeed = activeSpeed * 84;
@@ -1035,10 +1035,12 @@ class EnglishDash3DEngine {
       this.spawnTimer = 1.25;
       this.spawnRow();
     }
-    this.gateTimer -= dt;
-    if (this.gateTimer <= 0) {
-      this.gateTimer = 8.5;
-      this.spawnEducationalGates();
+    if (!this.activeGateQ) {
+      this.gateTimer -= dt;
+      if (this.gateTimer <= 0) {
+        this.gateTimer = 6.5;
+        this.spawnEducationalGates();
+      }
     }
 
     // Move & collide objects
