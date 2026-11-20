@@ -1,11 +1,12 @@
 import type { ApiErrorBody, AuthResponse } from '@fec/shared';
 import { useAuth } from '@/stores/auth';
+import { getOfflineSession, handleOfflineRequest, OfflineAuthError } from './offlineApi';
 
 /**
  * Fetch wrapper for the FUTURE ENGLISH CENTER API.
  * - Adds the in-memory access token.
  * - On 401, transparently refreshes once via the httpOnly refresh cookie and retries.
- * - Throws ApiError with the server's { code, message }.
+ * - Automatically falls back to Offline / GitHub Pages Demo Mode when no backend is reachable.
  */
 export class ApiError extends Error {
   constructor(
@@ -19,6 +20,7 @@ export class ApiError extends Error {
 }
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '/api';
+const isOfflineToken = (t: string | null) => t === 'offline-demo-token' || t === 'demo-token';
 
 let refreshing: Promise<boolean> | null = null;
 
@@ -27,7 +29,15 @@ export async function refreshSession(): Promise<boolean> {
     refreshing = (async () => {
       try {
         const res = await fetch(`${BASE}/auth/refresh`, { method: 'POST', credentials: 'include' });
+        const ct = res.headers.get('content-type') ?? '';
         if (!res.ok) {
+          if (!ct.includes('application/json')) {
+            const offlineUser = getOfflineSession();
+            if (offlineUser) {
+              useAuth.getState().setSession('offline-demo-token', offlineUser);
+              return true;
+            }
+          }
           useAuth.getState().clear();
           return false;
         }
@@ -35,6 +45,11 @@ export async function refreshSession(): Promise<boolean> {
         useAuth.getState().setSession(data.accessToken, data.user);
         return true;
       } catch {
+        const offlineUser = getOfflineSession();
+        if (offlineUser) {
+          useAuth.getState().setSession('offline-demo-token', offlineUser);
+          return true;
+        }
         return false;
       } finally {
         setTimeout(() => (refreshing = null), 0);
@@ -46,18 +61,45 @@ export async function refreshSession(): Promise<boolean> {
 
 type Options = Omit<RequestInit, 'body'> & { body?: unknown; raw?: boolean };
 
+function runOffline<T>(method: string, path: string, body?: unknown): T {
+  try {
+    return handleOfflineRequest<T>(method, path, body);
+  } catch (err) {
+    if (err instanceof OfflineAuthError) {
+      throw new ApiError(err.status, err.code, err.message);
+    }
+    throw err;
+  }
+}
+
 async function request<T>(path: string, opts: Options = {}, retry = true): Promise<T> {
+  const method = (opts.method ?? 'GET').toUpperCase();
   const token = useAuth.getState().accessToken;
+
+  if (isOfflineToken(token) && !path.startsWith('/auth/login') && !path.startsWith('/auth/register')) {
+    return runOffline<T>(method, path, opts.body);
+  }
+
   const headers = new Headers(opts.headers);
   if (opts.body !== undefined && !(opts.body instanceof FormData)) headers.set('Content-Type', 'application/json');
   if (token) headers.set('Authorization', `Bearer ${token}`);
 
-  const res = await fetch(`${BASE}${path}`, {
-    ...opts,
-    headers,
-    credentials: 'include',
-    body: opts.body === undefined ? undefined : opts.body instanceof FormData ? opts.body : JSON.stringify(opts.body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      ...opts,
+      headers,
+      credentials: 'include',
+      body: opts.body === undefined ? undefined : opts.body instanceof FormData ? opts.body : JSON.stringify(opts.body),
+    });
+  } catch {
+    return runOffline<T>(method, path, opts.body);
+  }
+
+  const ct = res.headers.get('content-type') ?? '';
+  if (!res.ok && !ct.includes('application/json') && [404, 405, 502, 503, 504].includes(res.status)) {
+    return runOffline<T>(method, path, opts.body);
+  }
 
   if (res.status === 401 && retry && !path.startsWith('/auth/')) {
     if (await refreshSession()) return request<T>(path, opts, false);
