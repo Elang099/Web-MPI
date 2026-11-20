@@ -894,6 +894,7 @@ class EnglishDash3DEngine {
       new THREE.PlaneGeometry(8.8, 1.8),
       new THREE.MeshBasicMaterial({ map: boardTex, transparent: true }),
     );
+    board.frustumCulled = false;
     board.position.set(0, 3.55, 0);
     gantry.add(board);
     gantry.position.set(0, 0, SPAWN_Z);
@@ -917,14 +918,14 @@ class EnglishDash3DEngine {
   private step(dt: number) {
     this.runTime += dt;
 
-    // Gentle speed ramp; only slows down when actually close to a Question Gate (z >= -28)
+    // Gentle speed ramp; only slows down when close to a Question Gate (z >= -10)
     this.baseSpeed = Math.min(0.45, 0.23 + this.distance * 0.0001);
     const approachingGate = this.objects.find((o) => o.kind === 'gate' && !o.hit);
     let targetSpeed = this.baseSpeed;
-    if (this.activeGateQ && approachingGate && approachingGate.z >= -28) {
+    if (this.activeGateQ && approachingGate && approachingGate.z >= -10) {
       targetSpeed = 0.095;
     }
-    this.currentSpeed = THREE.MathUtils.lerp(this.currentSpeed, targetSpeed, Math.min(1, dt * 4.5));
+    this.currentSpeed = THREE.MathUtils.lerp(this.currentSpeed, targetSpeed, Math.min(1, dt * 8));
 
     const activeSpeed = this.currentSpeed;
     const worldSpeed = activeSpeed * 84;
@@ -1079,7 +1080,7 @@ class EnglishDash3DEngine {
 
     if (this.gateBannerMesh) {
       this.gateBannerMesh.position.z += worldSpeed * dt;
-      if (this.gateBannerMesh.position.z > DESPAWN_Z || !this.activeGateQ) {
+      if (this.gateBannerMesh.position.z > 2) {
         this.scene.remove(this.gateBannerMesh);
         this.gateBannerMesh = null;
       }
