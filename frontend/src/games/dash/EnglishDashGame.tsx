@@ -196,13 +196,13 @@ class EnglishDash3DEngine {
   private popups: Popup3D[] = [];
   private gateBannerMesh: THREE.Group | null = null;
 
-  private sharedCoinGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.12, 20);
+  private sharedCoinGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.14, 24);
   private sharedCoinMat = new THREE.MeshStandardMaterial({
     color: 0xffd23f,
-    emissive: 0xd97706,
-    emissiveIntensity: 0.35,
-    metalness: 0.7,
-    roughness: 0.25,
+    emissive: 0xf59e0b,
+    emissiveIntensity: 0.45,
+    metalness: 0.72,
+    roughness: 0.22,
   });
   private redStripeTex = makeStripeTexture('#F43F5E', '#FFFFFF');
   private orangeStripeTex = makeStripeTexture('#F97316', '#FEF08A');
@@ -214,6 +214,7 @@ class EnglishDash3DEngine {
   private slideTimer = 0;
   private shakeTimer = 0;
   private runTime = 0;
+  private stridePhase = 0;
 
   private lives = 3;
   private score = 0;
@@ -221,6 +222,7 @@ class EnglishDash3DEngine {
   private coins = 0;
   private combo = 0;
   private baseSpeed = 0.23;
+  private currentSpeed = 0.23;
 
   private shieldTimer = 0;
   private magnetTimer = 0;
@@ -721,22 +723,43 @@ class EnglishDash3DEngine {
     }
 
     if (kind === 'coin') {
+      const grp = new THREE.Group();
       const coin = new THREE.Mesh(this.sharedCoinGeo, this.sharedCoinMat);
       coin.rotation.z = Math.PI / 2;
-      coin.position.y = 0.95;
+      coin.position.y = 1.05;
       coin.castShadow = true;
-      return coin;
+      grp.add(coin);
+
+      // Subtle golden ground ring so coin pops clearly above the dark track
+      const halo = new THREE.Mesh(
+        new THREE.RingGeometry(0.28, 0.42, 20),
+        new THREE.MeshBasicMaterial({ color: 0xffd23f, transparent: true, opacity: 0.4, side: THREE.DoubleSide }),
+      );
+      halo.rotation.x = -Math.PI / 2;
+      halo.position.y = 0.09;
+      grp.add(halo);
+      return grp;
     }
 
     if (kind === 'letter') {
-      const tex = makeTextTexture(label || 'A', { width: 160, height: 160, bg: '#0E7490', border: '#22D3EE', color: '#FFFFFF', fontSize: 82 });
+      const grp = new THREE.Group();
+      const tex = makeTextTexture(label || 'A', { width: 160, height: 160, bg: '#0E7490', border: '#22D3EE', color: '#FFFFFF', fontSize: 88 });
       const box = new THREE.Mesh(
-        new THREE.BoxGeometry(0.85, 0.85, 0.85),
-        new THREE.MeshStandardMaterial({ map: tex, emissive: 0x06b6d4, emissiveIntensity: 0.28 }),
+        new THREE.BoxGeometry(0.95, 0.95, 0.95),
+        new THREE.MeshStandardMaterial({ map: tex, emissive: 0x06b6d4, emissiveIntensity: 0.38 }),
       );
-      box.position.y = 1.05;
+      box.position.y = 1.15;
       box.castShadow = true;
-      return box;
+      grp.add(box);
+
+      const halo = new THREE.Mesh(
+        new THREE.RingGeometry(0.45, 0.62, 24),
+        new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.45, side: THREE.DoubleSide }),
+      );
+      halo.rotation.x = -Math.PI / 2;
+      halo.position.y = 0.09;
+      grp.add(halo);
+      return grp;
     }
 
     if (kind === 'magnet' || kind === 'shield' || kind === 'x2') {
@@ -868,10 +891,10 @@ class EnglishDash3DEngine {
       maxLines: 3,
     });
     const board = new THREE.Mesh(
-      new THREE.PlaneGeometry(8.8, 1.85),
+      new THREE.PlaneGeometry(8.8, 1.8),
       new THREE.MeshBasicMaterial({ map: boardTex, transparent: true }),
     );
-    board.position.set(0, 3.85, 0);
+    board.position.set(0, 3.55, 0);
     gantry.add(board);
     gantry.position.set(0, 0, SPAWN_Z);
     this.scene.add(gantry);
@@ -894,9 +917,16 @@ class EnglishDash3DEngine {
   private step(dt: number) {
     this.runTime += dt;
 
-    // Gentle speed ramp; slows slightly during Question Gates for clear reading
+    // Gentle speed ramp; smoothly slows down when approaching a Question Gate so players can read & think!
     this.baseSpeed = Math.min(0.45, 0.23 + this.distance * 0.0001);
-    const activeSpeed = this.activeGateQ ? Math.min(0.165, this.baseSpeed * 0.72) : this.baseSpeed;
+    const approachingGate = this.objects.find((o) => o.kind === 'gate' && !o.hit);
+    let targetSpeed = this.baseSpeed;
+    if (this.activeGateQ && approachingGate) {
+      targetSpeed = approachingGate.z > -62 ? 0.088 : 0.14;
+    }
+    this.currentSpeed = THREE.MathUtils.lerp(this.currentSpeed, targetSpeed, Math.min(1, dt * 3.5));
+
+    const activeSpeed = this.currentSpeed;
     const worldSpeed = activeSpeed * 84;
     const mult = this.doubleTimer > 0 ? 2 : 1;
 
@@ -964,10 +994,11 @@ class EnglishDash3DEngine {
       if (this.gateFlashTimer <= 0) this.gateFlash = null;
     }
 
-    // Animate 3D player avatar
+    // Animate 3D player avatar (stride slows down smoothly when avatar slows near Question Gates)
     const px = LANE_X[0] + (this.visualLane / 2) * (LANE_X[2] - LANE_X[0]);
     const isSliding = this.slideTimer > 0;
-    const stride = this.jumpY === 0 && !isSliding ? Math.sin(this.runTime * 15) : 0;
+    this.stridePhase += dt * (15 * (this.currentSpeed / 0.23));
+    const stride = this.jumpY === 0 && !isSliding ? Math.sin(this.stridePhase) : 0;
 
     this.playerGroup.position.set(px, this.jumpY + (this.jumpY === 0 && !isSliding ? Math.abs(stride) * 0.08 : 0), 0);
     this.playerGroup.rotation.z = THREE.MathUtils.clamp(-laneDelta * 0.035, -0.28, 0.28);
@@ -1020,12 +1051,16 @@ class EnglishDash3DEngine {
       }
 
       const ox = LANE_X[0] + (obj.lane / 2) * (LANE_X[2] - LANE_X[0]);
-      obj.mesh.position.set(ox, obj.mesh.position.y, obj.z);
+      obj.mesh.position.set(ox, 0, obj.z);
 
-      if (obj.kind === 'coin') {
-        obj.mesh.rotation.y += dt * 3.8;
-      } else if (obj.kind === 'letter' || obj.kind === 'magnet' || obj.kind === 'shield' || obj.kind === 'x2') {
-        obj.mesh.rotation.y += dt * 2.2;
+      if (obj.kind === 'coin' && obj.mesh.children[0]) {
+        obj.mesh.children[0].rotation.y += dt * 3.8;
+        obj.mesh.children[0].position.y = 1.05 + Math.sin(this.runTime * 4.5 + i) * 0.14;
+      } else if (obj.kind === 'letter' && obj.mesh.children[0]) {
+        obj.mesh.children[0].rotation.y += dt * 2.2;
+        obj.mesh.children[0].position.y = 1.15 + Math.sin(this.runTime * 4 + i) * 0.14;
+      } else if ((obj.kind === 'magnet' || obj.kind === 'shield' || obj.kind === 'x2') && obj.mesh.children[0]) {
+        obj.mesh.children[0].rotation.y += dt * 2.2;
       }
 
       if (!obj.hit && obj.z >= -0.85 && obj.z <= 0.85) {
