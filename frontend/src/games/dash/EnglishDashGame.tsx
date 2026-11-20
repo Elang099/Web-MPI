@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import Phaser from 'phaser';
+import * as THREE from 'three';
 import type { PublicQuestion } from '@fec/shared';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Magnet, Shield, Sparkles, Zap } from 'lucide-react';
 import { api } from '@/services/api';
 import { celebrate, toast } from '@/stores/ui';
 import { gameAudio } from '../core/audioManager';
 import { GameHudBar, GameOverlayModal, type GameResultSummary, type GameState } from '../core/GameStateMachine';
-import { drawPhaserAvatar } from '../core/phaserAvatar';
 import type { AvatarConfig } from '../AvatarRenderer';
 
 interface DashCallbacks {
@@ -29,34 +28,199 @@ interface DashCallbacks {
 }
 
 const TARGET_WORDS = ['FUTURE', 'FLUENT', 'LEARN', 'SPEAK', 'BRIDGE', 'SMART'];
+const LANE_X = [-2.55, 0, 2.55];
+const SPAWN_Z = -86;
+const DESPAWN_Z = 8;
+
+const OUTFIT_COLORS: Record<string, { main: string; accent: string }> = {
+  'outfit-hoodie-cyan': { main: '#00A8CC', accent: '#00D1FF' },
+  'outfit-varsity-purple': { main: '#7C3AED', accent: '#C084FC' },
+  'outfit-blazer-navy': { main: '#1B2763', accent: '#F59E0B' },
+  'outfit-runner-gold': { main: '#D97706', accent: '#FDE047' },
+  'outfit-explorer-emerald': { main: '#16A34A', accent: '#86EFAC' },
+  'outfit-cyber-legend': { main: '#0F172A', accent: '#00D1FF' },
+};
+
+const SHOE_COLORS: Record<string, string> = {
+  'shoes-sneakers': '#F8FAFC',
+  'shoes-turbo': '#FF4D8D',
+  'shoes-hover': '#00D1FF',
+};
+
+function makeTextTexture(
+  text: string,
+  opts: {
+    width?: number;
+    height?: number;
+    bg?: string;
+    border?: string;
+    color?: string;
+    fontSize?: number;
+    maxLines?: number;
+  } = {},
+): THREE.CanvasTexture {
+  const w = opts.width ?? 512;
+  const h = opts.height ?? 160;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+
+  if (opts.bg && opts.bg !== 'transparent') {
+    ctx.fillStyle = opts.bg;
+    ctx.beginPath();
+    ctx.roundRect(6, 6, w - 12, h - 12, 22);
+    ctx.fill();
+  }
+  if (opts.border) {
+    ctx.strokeStyle = opts.border;
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.roundRect(6, 6, w - 12, h - 12, 22);
+    ctx.stroke();
+  }
+
+  const fontSize = opts.fontSize ?? 34;
+  ctx.font = `800 ${fontSize}px Outfit, "Plus Jakarta Sans", sans-serif`;
+  ctx.fillStyle = opts.color ?? '#FFFFFF';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Word wrap
+  const maxWidth = w - 48;
+  const words = text.split(' ');
+  const lines: string[] = [];
+  let current = '';
+  for (const word of words) {
+    const test = current ? `${current} ${word}` : word;
+    if (ctx.measureText(test).width > maxWidth && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = test;
+    }
+  }
+  if (current) lines.push(current);
+
+  const clipped = lines.slice(0, opts.maxLines ?? 3);
+  const lineH = fontSize * 1.22;
+  const startY = h / 2 - ((clipped.length - 1) * lineH) / 2;
+  ctx.shadowColor = 'rgba(5, 8, 22, 0.85)';
+  ctx.shadowBlur = 8;
+  clipped.forEach((ln, i) => {
+    ctx.fillText(ln, w / 2, startY + i * lineH);
+  });
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function makeStripeTexture(c1: string, c2: string): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = c1;
+  ctx.fillRect(0, 0, 256, 64);
+  ctx.fillStyle = c2;
+  for (let x = -64; x < 320; x += 48) {
+    ctx.beginPath();
+    ctx.moveTo(x, 64);
+    ctx.lineTo(x + 24, 64);
+    ctx.lineTo(x + 48, 0);
+    ctx.lineTo(x + 24, 0);
+    ctx.closePath();
+    ctx.fill();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+interface DashObject {
+  kind: 'barrier_low' | 'barrier_high' | 'coin' | 'letter' | 'magnet' | 'shield' | 'x2' | 'gate';
+  lane: number;
+  z: number;
+  label?: string;
+  questionId?: string;
+  hit?: boolean;
+  mesh: THREE.Object3D;
+}
+
+interface SideProp {
+  z: number;
+  mesh: THREE.Group;
+}
+
+interface Popup3D {
+  sprite: THREE.Sprite;
+  life: number;
+}
 
 /**
- * Phaser 3 Behind-the-Character 2.5D 3-Lane Endless Runner ("English Dash").
- * Answer questions are mounted on a glowing Highway Gantry directly above the 3 gate boxes
- * inside the canvas, and approach gently so players have clear time to read and steer.
+ * Three.js 3D Behind-the-Character Subway Surfers-style Endless Runner ("English Dash").
+ * Preserves all obstacles (red jump barriers, orange slide overhead beams), collectibles
+ * (coins, word letters, magnet/shield/x2 powerups), customizable 3D avatar, and glowing
+ * 3D Highway Question Gantries + 3 Answer Gates.
  */
-class EnglishDashScene extends Phaser.Scene {
-  private questions: PublicQuestion[] = [];
-  private cb!: DashCallbacks;
+class EnglishDash3DEngine {
+  private container: HTMLElement;
+  private questions: PublicQuestion[];
+  private cb: DashCallbacks;
   private avatar?: AvatarConfig | null;
 
-  private g!: Phaser.GameObjects.Graphics;
-  private gateTexts: Phaser.GameObjects.Text[] = [];
-  private gateBannerText!: Phaser.GameObjects.Text;
-  private itemTexts: Phaser.GameObjects.Text[] = [];
-  private popups: { text: Phaser.GameObjects.Text; life: number }[] = [];
+  private renderer!: THREE.WebGLRenderer;
+  private scene!: THREE.Scene;
+  private camera!: THREE.PerspectiveCamera;
+  private resizeObs?: ResizeObserver;
+
+  private playerGroup!: THREE.Group;
+  private playerBody!: THREE.Group;
+  private leftArm!: THREE.Mesh;
+  private rightArm!: THREE.Mesh;
+  private leftLeg!: THREE.Mesh;
+  private rightLeg!: THREE.Mesh;
+  private shieldSphere!: THREE.Mesh;
+  private magnetRing!: THREE.Mesh;
+  private x2Ring!: THREE.Mesh;
+
+  private sleepers: THREE.Mesh[] = [];
+  private buildings: THREE.Mesh[] = [];
+  private props: SideProp[] = [];
+  private objects: DashObject[] = [];
+  private popups: Popup3D[] = [];
+  private gateBannerMesh: THREE.Group | null = null;
+
+  private sharedCoinGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.12, 20);
+  private sharedCoinMat = new THREE.MeshStandardMaterial({
+    color: 0xffd23f,
+    emissive: 0xd97706,
+    emissiveIntensity: 0.35,
+    metalness: 0.7,
+    roughness: 0.25,
+  });
+  private redStripeTex = makeStripeTexture('#F43F5E', '#FFFFFF');
+  private orangeStripeTex = makeStripeTexture('#F97316', '#FEF08A');
 
   private lane = 1;
   private visualLane = 1;
   private jumpY = 0;
   private jumpVel = 0;
   private slideTimer = 0;
+  private shakeTimer = 0;
+  private runTime = 0;
+
   private lives = 3;
   private score = 0;
   private distance = 0;
   private coins = 0;
   private combo = 0;
-  private baseSpeed = 0.23; // comfortable reading & dodging pace
+  private baseSpeed = 0.23;
 
   private shieldTimer = 0;
   private magnetTimer = 0;
@@ -67,172 +231,407 @@ class EnglishDashScene extends Phaser.Scene {
   private letterProgress = 0;
 
   private qIdx = 0;
-  private spawnTimer = 1.3;
+  private spawnTimer = 1.1;
   private gateTimer = 3.6;
+  private propTimer = 0.25;
   private activeGateQ: PublicQuestion | null = null;
   private gateFlashTimer = 0;
   private gateFlash: { text: string; good: boolean } | null = null;
 
-  private props: { side: -1 | 1; z: number; kind: 'lamp' | 'tree' }[] = [];
-  private propTimer = 0.4;
-
-  private objects: {
-    kind: 'barrier_low' | 'barrier_high' | 'coin' | 'letter' | 'magnet' | 'shield' | 'x2' | 'gate';
-    lane: number;
-    z: number;
-    label?: string;
-    questionId?: string;
-    hit?: boolean;
-  }[] = [];
-
   private isPaused = false;
   private finished = false;
-  private swipeStart: { x: number; y: number } | null = null;
+  private destroyed = false;
+  private rafId = 0;
+  private lastTime = 0;
   private hudTick = 0;
+  private swipeStart: { x: number; y: number } | null = null;
 
-  constructor(questions: PublicQuestion[], cb: DashCallbacks, avatar?: AvatarConfig | null) {
-    super('EnglishDashScene');
+  private onKeyDownBound: (e: KeyboardEvent) => void;
+  private onPointerDownBound: (e: PointerEvent) => void;
+  private onPointerUpBound: (e: PointerEvent) => void;
+
+  constructor(container: HTMLElement, questions: PublicQuestion[], cb: DashCallbacks, avatar?: AvatarConfig | null) {
+    this.container = container;
     this.questions = questions;
     this.cb = cb;
     this.avatar = avatar;
-  }
 
-  create() {
-    this.g = this.add.graphics();
+    this.onKeyDownBound = this.handleKeyDown.bind(this);
+    this.onPointerDownBound = this.handlePointerDown.bind(this);
+    this.onPointerUpBound = this.handlePointerUp.bind(this);
 
-    // Seed initial roadside lampposts & palms for depth immediately
-    for (let i = 0; i < 6; i++) {
-      const z = (i + 1) / 6;
-      this.props.push({ side: -1, z, kind: i % 2 === 0 ? 'lamp' : 'tree' });
-      this.props.push({ side: 1, z, kind: i % 2 === 0 ? 'lamp' : 'tree' });
-    }
-
-    // Overhead Question Gantry Text attached right above the 3 gate boxes
-    this.gateBannerText = this.add
-      .text(450, 0, '', {
-        fontFamily: 'Outfit, Plus Jakarta Sans, sans-serif',
-        fontSize: '18px',
-        fontStyle: 'bold',
-        color: '#FFFFFF',
-        stroke: '#050816',
-        strokeThickness: 4,
-        align: 'center',
-        wordWrap: { width: 520 },
-      })
-      .setOrigin(0.5)
-      .setDepth(25)
-      .setVisible(false);
-
-    for (let i = 0; i < 3; i++) {
-      const t = this.add
-        .text(0, 0, '', {
-          fontFamily: 'Outfit, Plus Jakarta Sans, sans-serif',
-          fontSize: '16px',
-          fontStyle: 'bold',
-          color: '#FFFFFF',
-          stroke: '#050816',
-          strokeThickness: 5,
-          align: 'center',
-          wordWrap: { width: 130 },
-        })
-        .setOrigin(0.5)
-        .setDepth(22)
-        .setVisible(false);
-      this.gateTexts.push(t);
-    }
-
-    for (let i = 0; i < 18; i++) {
-      const t = this.add
-        .text(0, 0, '', {
-          fontFamily: 'Outfit, sans-serif',
-          fontSize: '15px',
-          fontStyle: 'bold',
-          color: '#FFFFFF',
-          stroke: '#050816',
-          strokeThickness: 4,
-        })
-        .setOrigin(0.5)
-        .setDepth(15)
-        .setVisible(false);
-      this.itemTexts.push(t);
-    }
-
-    this.input.keyboard?.addCapture([
-      Phaser.Input.Keyboard.KeyCodes.UP,
-      Phaser.Input.Keyboard.KeyCodes.DOWN,
-      Phaser.Input.Keyboard.KeyCodes.LEFT,
-      Phaser.Input.Keyboard.KeyCodes.RIGHT,
-      Phaser.Input.Keyboard.KeyCodes.SPACE,
-      Phaser.Input.Keyboard.KeyCodes.W,
-      Phaser.Input.Keyboard.KeyCodes.A,
-      Phaser.Input.Keyboard.KeyCodes.S,
-      Phaser.Input.Keyboard.KeyCodes.D,
-    ]);
-
-    this.input.keyboard?.on('keydown-LEFT', (event?: KeyboardEvent) => {
-      event?.preventDefault();
-      this.moveLane(-1);
-    });
-    this.input.keyboard?.on('keydown-A', (event?: KeyboardEvent) => {
-      event?.preventDefault();
-      this.moveLane(-1);
-    });
-    this.input.keyboard?.on('keydown-RIGHT', (event?: KeyboardEvent) => {
-      event?.preventDefault();
-      this.moveLane(1);
-    });
-    this.input.keyboard?.on('keydown-D', (event?: KeyboardEvent) => {
-      event?.preventDefault();
-      this.moveLane(1);
-    });
-    this.input.keyboard?.on('keydown-UP', (event?: KeyboardEvent) => {
-      event?.preventDefault();
-      this.jump();
-    });
-    this.input.keyboard?.on('keydown-W', (event?: KeyboardEvent) => {
-      event?.preventDefault();
-      this.jump();
-    });
-    this.input.keyboard?.on('keydown-SPACE', (event?: KeyboardEvent) => {
-      event?.preventDefault();
-      this.jump();
-    });
-    this.input.keyboard?.on('keydown-DOWN', (event?: KeyboardEvent) => {
-      event?.preventDefault();
-      this.slide();
-    });
-    this.input.keyboard?.on('keydown-S', (event?: KeyboardEvent) => {
-      event?.preventDefault();
-      this.slide();
-    });
-
-    this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
-      this.swipeStart = { x: p.x, y: p.y };
-    });
-    this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
-      if (!this.swipeStart) return;
-      const dx = p.x - this.swipeStart.x;
-      const dy = p.y - this.swipeStart.y;
-      this.swipeStart = null;
-      if (Math.abs(dx) < 18 && Math.abs(dy) < 18) return;
-      if (Math.abs(dx) > Math.abs(dy)) this.moveLane(dx > 0 ? 1 : -1);
-      else if (dy < 0) this.jump();
-      else this.slide();
-    });
-
+    this.initThree();
+    this.buildEnvironment();
+    this.buildPlayer();
+    this.bindInputs();
     this.pushHud();
+
+    this.lastTime = performance.now();
+    this.rafId = requestAnimationFrame(this.loop);
   }
 
-  private spawnPopup(x: number, y: number, label: string, color = '#FFD23F') {
-    const t = this.add
-      .text(x, y, label, { fontFamily: 'Outfit, sans-serif', fontSize: '19px', fontStyle: 'bold', color, stroke: '#050816', strokeThickness: 4 })
-      .setOrigin(0.5)
-      .setDepth(30);
-    this.popups.push({ text: t, life: 0.8 });
+  private initThree() {
+    const w = this.container.clientWidth || 900;
+    const h = this.container.clientHeight || 520;
+
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setSize(w, h);
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.15;
+
+    this.container.innerHTML = '';
+    this.renderer.domElement.style.width = '100%';
+    this.renderer.domElement.style.height = '100%';
+    this.renderer.domElement.style.display = 'block';
+    this.container.appendChild(this.renderer.domElement);
+
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x1b1464);
+    this.scene.fog = new THREE.FogExp2(0x2e1065, 0.0115);
+
+    this.camera = new THREE.PerspectiveCamera(62, w / h, 0.1, 180);
+    this.camera.position.set(0, 3.85, 6.4);
+    this.camera.lookAt(0, 1.4, -22);
+
+    const hemi = new THREE.HemisphereLight(0xa5f3fc, 0x1e1b4b, 1.15);
+    this.scene.add(hemi);
+
+    const dir = new THREE.DirectionalLight(0xfff1d6, 1.55);
+    dir.position.set(8, 16, 10);
+    dir.castShadow = true;
+    dir.shadow.mapSize.set(1024, 1024);
+    dir.shadow.camera.near = 1;
+    dir.shadow.camera.far = 65;
+    dir.shadow.camera.left = -12;
+    dir.shadow.camera.right = 12;
+    dir.shadow.camera.top = 12;
+    dir.shadow.camera.bottom = -35;
+    this.scene.add(dir);
+
+    this.resizeObs = new ResizeObserver(() => {
+      if (this.destroyed) return;
+      const cw = this.container.clientWidth || 900;
+      const ch = this.container.clientHeight || 520;
+      this.camera.aspect = cw / ch;
+      this.camera.updateProjectionMatrix();
+      this.renderer.setSize(cw, ch);
+    });
+    this.resizeObs.observe(this.container);
+  }
+
+  private buildEnvironment() {
+    // Sunset gradient backdrop plane & glowing sun
+    const sunGeo = new THREE.CircleGeometry(14, 32);
+    const sunMat = new THREE.MeshBasicMaterial({ color: 0xff9e3d, fog: false });
+    const sun = new THREE.Mesh(sunGeo, sunMat);
+    sun.position.set(0, 14, -125);
+    this.scene.add(sun);
+
+    const haloGeo = new THREE.CircleGeometry(22, 32);
+    const haloMat = new THREE.MeshBasicMaterial({ color: 0xf43f5e, transparent: true, opacity: 0.25, fog: false });
+    const halo = new THREE.Mesh(haloGeo, haloMat);
+    halo.position.set(0, 14, -126);
+    this.scene.add(halo);
+
+    // Grass / Embankment ground
+    const groundGeo = new THREE.PlaneGeometry(160, 160);
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0x0f2e24, roughness: 0.95 });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.set(0, -0.05, -55);
+    ground.receiveShadow = true;
+    this.scene.add(ground);
+
+    // Main 3-lane subway track bed
+    const trackGeo = new THREE.BoxGeometry(9.2, 0.16, 150);
+    const trackMat = new THREE.MeshStandardMaterial({ color: 0x1e295b, roughness: 0.75, metalness: 0.15 });
+    const track = new THREE.Mesh(trackGeo, trackMat);
+    track.position.set(0, -0.04, -55);
+    track.receiveShadow = true;
+    this.scene.add(track);
+
+    // Side concrete curbs with neon trim
+    const curbGeo = new THREE.BoxGeometry(0.65, 0.35, 150);
+    const curbMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.6 });
+    const neonCurbMat = new THREE.MeshBasicMaterial({ color: 0x00d1ff });
+    for (const side of [-1, 1]) {
+      const curb = new THREE.Mesh(curbGeo, curbMat);
+      curb.position.set(side * 4.85, 0.1, -55);
+      curb.receiveShadow = true;
+      this.scene.add(curb);
+
+      const trim = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.08, 150), neonCurbMat);
+      trim.position.set(side * 4.55, 0.29, -55);
+      this.scene.add(trim);
+    }
+
+    // 3 pairs of metallic/neon subway rails
+    const railGeo = new THREE.BoxGeometry(0.12, 0.08, 150);
+    const railMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0284c7, emissiveIntensity: 0.45, metalness: 0.7, roughness: 0.25 });
+    for (const lx of LANE_X) {
+      for (const offset of [-0.68, 0.68]) {
+        const rail = new THREE.Mesh(railGeo, railMat);
+        rail.position.set(lx + offset, 0.06, -55);
+        this.scene.add(rail);
+      }
+    }
+
+    // Lane divider glow lines
+    const divGeo = new THREE.PlaneGeometry(0.08, 150);
+    const divMat = new THREE.MeshBasicMaterial({ color: 0xa855f7, transparent: true, opacity: 0.55 });
+    for (const dx of [-1.275, 1.275]) {
+      const div = new THREE.Mesh(divGeo, divMat);
+      div.rotation.x = -Math.PI / 2;
+      div.position.set(dx, 0.045, -55);
+      this.scene.add(div);
+    }
+
+    // Scrolling railway sleepers
+    const sleeperGeo = new THREE.BoxGeometry(8.4, 0.06, 0.32);
+    const sleeperMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.85 });
+    for (let z = 6; z >= -102; z -= 2.4) {
+      const s = new THREE.Mesh(sleeperGeo, sleeperMat);
+      s.position.set(0, 0.03, z);
+      s.receiveShadow = true;
+      this.scene.add(s);
+      this.sleepers.push(s);
+    }
+
+    // Stylized city skyline buildings on both sides
+    const bColors = [0x1e1b4b, 0x312e81, 0x3b0764, 0x172554];
+    for (let z = 0; z >= -110; z -= 9) {
+      for (const side of [-1, 1]) {
+        const bh = 6 + Math.random() * 14;
+        const bw = 4.5 + Math.random() * 3.5;
+        const bGeo = new THREE.BoxGeometry(bw, bh, 6.2);
+        const bMat = new THREE.MeshStandardMaterial({
+          color: bColors[Math.floor(Math.random() * bColors.length)],
+          roughness: 0.65,
+        });
+        const b = new THREE.Mesh(bGeo, bMat);
+        b.position.set(side * (11.5 + Math.random() * 5), bh / 2 - 0.1, z);
+
+        // Glowing window strip
+        const winGeo = new THREE.PlaneGeometry(bw * 0.65, bh * 0.65);
+        const winMat = new THREE.MeshBasicMaterial({
+          color: Math.random() < 0.5 ? 0x38bdf8 : 0xfbbf24,
+          transparent: true,
+          opacity: 0.32,
+        });
+        const win = new THREE.Mesh(winGeo, winMat);
+        win.position.set(side < 0 ? bw / 2 + 0.02 : -bw / 2 - 0.02, 0.4, 0);
+        win.rotation.y = side < 0 ? Math.PI / 2 : -Math.PI / 2;
+        b.add(win);
+
+        this.scene.add(b);
+        this.buildings.push(b);
+      }
+    }
+
+    // Initial roadside lamps & cyber palms
+    for (let z = 2; z >= -80; z -= 11) {
+      this.spawnSideProp(z);
+    }
+  }
+
+  private spawnSideProp(z: number) {
+    const isLamp = Math.random() < 0.55;
+    for (const side of [-1, 1] as const) {
+      const grp = new THREE.Group();
+      if (isLamp) {
+        const pole = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.08, 0.11, 3.8, 8),
+          new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.6 }),
+        );
+        pole.position.y = 1.9;
+        grp.add(pole);
+
+        const arm = new THREE.Mesh(
+          new THREE.BoxGeometry(0.9, 0.08, 0.1),
+          new THREE.MeshStandardMaterial({ color: 0x64748b }),
+        );
+        arm.position.set(-side * 0.4, 3.75, 0);
+        grp.add(arm);
+
+        const bulb = new THREE.Mesh(
+          new THREE.SphereGeometry(0.2, 10, 10),
+          new THREE.MeshBasicMaterial({ color: 0x38bdf8 }),
+        );
+        bulb.position.set(-side * 0.8, 3.65, 0);
+        grp.add(bulb);
+      } else {
+        const trunk = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.14, 0.22, 2.8, 8),
+          new THREE.MeshStandardMaterial({ color: 0x78350f }),
+        );
+        trunk.position.y = 1.4;
+        grp.add(trunk);
+
+        const leaves = new THREE.Mesh(
+          new THREE.ConeGeometry(1.15, 2.1, 7),
+          new THREE.MeshStandardMaterial({ color: 0x10b981, roughness: 0.7 }),
+        );
+        leaves.position.y = 3.2;
+        grp.add(leaves);
+      }
+      grp.position.set(side * 5.65, 0, z);
+      this.scene.add(grp);
+      this.props.push({ z, mesh: grp });
+    }
+  }
+
+  private buildPlayer() {
+    const skin = this.avatar?.skinTone || '#F1C27D';
+    const hair = this.avatar?.hairColor || '#1E293B';
+    const outfitKey = this.avatar?.outfit || 'outfit-hoodie-cyan';
+    const outfit = OUTFIT_COLORS[outfitKey] ?? OUTFIT_COLORS['outfit-hoodie-cyan'];
+    const shoeColor = SHOE_COLORS[this.avatar?.shoes || 'shoes-sneakers'] ?? '#F8FAFC';
+
+    this.playerGroup = new THREE.Group();
+    this.playerBody = new THREE.Group();
+    this.playerGroup.add(this.playerBody);
+
+    const torsoMat = new THREE.MeshStandardMaterial({ color: outfit.main, roughness: 0.5 });
+    const accentMat = new THREE.MeshStandardMaterial({ color: outfit.accent, emissive: outfit.accent, emissiveIntensity: 0.25 });
+    const skinMat = new THREE.MeshStandardMaterial({ color: skin, roughness: 0.6 });
+    const hairMat = new THREE.MeshStandardMaterial({ color: hair, roughness: 0.6 });
+    const pantsMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.7 });
+    const shoeMat = new THREE.MeshStandardMaterial({ color: shoeColor, roughness: 0.4 });
+
+    // Torso
+    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.78, 0.38), torsoMat);
+    torso.position.y = 1.12;
+    torso.castShadow = true;
+    this.playerBody.add(torso);
+
+    // Backpack / Jet-pack accent
+    const pack = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.52, 0.2), accentMat);
+    pack.position.set(0, 1.14, 0.26);
+    pack.castShadow = true;
+    this.playerBody.add(pack);
+
+    // Head
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.48, 0.48), skinMat);
+    head.position.y = 1.8;
+    head.castShadow = true;
+    this.playerBody.add(head);
+
+    // Hair cap
+    const hairCap = new THREE.Mesh(new THREE.BoxGeometry(0.54, 0.22, 0.52), hairMat);
+    hairCap.position.set(0, 2.04, 0.02);
+    this.playerBody.add(hairCap);
+
+    // Optional Hat / Cap if equipped
+    if (this.avatar?.accessory?.includes('cap') || this.avatar?.accessory?.includes('crown')) {
+      const capColor = this.avatar.accessory.includes('crown') ? 0xfacc15 : 0x00d1ff;
+      const cap = new THREE.Mesh(
+        new THREE.BoxGeometry(0.56, 0.16, 0.56),
+        new THREE.MeshStandardMaterial({ color: capColor, roughness: 0.4 }),
+      );
+      cap.position.set(0, 2.15, 0);
+      this.playerBody.add(cap);
+    }
+
+    // Arms
+    const armGeo = new THREE.BoxGeometry(0.2, 0.64, 0.2);
+    this.leftArm = new THREE.Mesh(armGeo, torsoMat);
+    this.leftArm.position.set(-0.48, 1.12, 0);
+    this.leftArm.castShadow = true;
+    this.playerBody.add(this.leftArm);
+
+    this.rightArm = new THREE.Mesh(armGeo, torsoMat);
+    this.rightArm.position.set(0.48, 1.12, 0);
+    this.rightArm.castShadow = true;
+    this.playerBody.add(this.rightArm);
+
+    // Legs + Shoes
+    const legGeo = new THREE.BoxGeometry(0.24, 0.62, 0.24);
+    const shoeGeo = new THREE.BoxGeometry(0.26, 0.18, 0.38);
+
+    this.leftLeg = new THREE.Mesh(legGeo, pantsMat);
+    this.leftLeg.position.set(-0.18, 0.44, 0);
+    this.leftLeg.castShadow = true;
+    const leftShoe = new THREE.Mesh(shoeGeo, shoeMat);
+    leftShoe.position.set(0, -0.32, -0.05);
+    this.leftLeg.add(leftShoe);
+    this.playerBody.add(this.leftLeg);
+
+    this.rightLeg = new THREE.Mesh(legGeo, pantsMat);
+    this.rightLeg.position.set(0.18, 0.44, 0);
+    this.rightLeg.castShadow = true;
+    const rightShoe = new THREE.Mesh(shoeGeo, shoeMat);
+    rightShoe.position.set(0, -0.32, -0.05);
+    this.rightLeg.add(rightShoe);
+    this.playerBody.add(this.rightLeg);
+
+    // Powerup Auras (hidden until active)
+    this.shieldSphere = new THREE.Mesh(
+      new THREE.SphereGeometry(1.18, 20, 16),
+      new THREE.MeshBasicMaterial({ color: 0x22c55e, transparent: true, opacity: 0.25, wireframe: true }),
+    );
+    this.shieldSphere.position.y = 1.1;
+    this.shieldSphere.visible = false;
+    this.playerGroup.add(this.shieldSphere);
+
+    this.magnetRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.95, 0.06, 10, 28),
+      new THREE.MeshBasicMaterial({ color: 0xec4899 }),
+    );
+    this.magnetRing.rotation.x = Math.PI / 2;
+    this.magnetRing.position.y = 1.05;
+    this.magnetRing.visible = false;
+    this.playerGroup.add(this.magnetRing);
+
+    this.x2Ring = new THREE.Mesh(
+      new THREE.TorusGeometry(0.8, 0.05, 10, 24),
+      new THREE.MeshBasicMaterial({ color: 0xa855f7 }),
+    );
+    this.x2Ring.rotation.x = Math.PI / 2;
+    this.x2Ring.position.y = 0.25;
+    this.x2Ring.visible = false;
+    this.playerGroup.add(this.x2Ring);
+
+    this.scene.add(this.playerGroup);
+  }
+
+  private bindInputs() {
+    window.addEventListener('keydown', this.onKeyDownBound, { passive: false });
+    this.renderer.domElement.addEventListener('pointerdown', this.onPointerDownBound);
+    this.renderer.domElement.addEventListener('pointerup', this.onPointerUpBound);
+  }
+
+  private handleKeyDown(e: KeyboardEvent) {
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', ' '].includes(e.key) || ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
+      e.preventDefault();
+    }
+    if (e.repeat) return;
+    if (e.code === 'ArrowLeft' || e.code === 'KeyA') this.moveLane(-1);
+    else if (e.code === 'ArrowRight' || e.code === 'KeyD') this.moveLane(1);
+    else if (e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Space') this.jump();
+    else if (e.code === 'ArrowDown' || e.code === 'KeyS') this.slide();
+  }
+
+  private handlePointerDown(e: PointerEvent) {
+    this.swipeStart = { x: e.clientX, y: e.clientY };
+  }
+
+  private handlePointerUp(e: PointerEvent) {
+    if (!this.swipeStart) return;
+    const dx = e.clientX - this.swipeStart.x;
+    const dy = e.clientY - this.swipeStart.y;
+    this.swipeStart = null;
+    if (Math.abs(dx) < 18 && Math.abs(dy) < 18) return;
+    if (Math.abs(dx) > Math.abs(dy)) this.moveLane(dx > 0 ? 1 : -1);
+    else if (dy < 0) this.jump();
+    else this.slide();
   }
 
   public setPaused(p: boolean) {
     this.isPaused = p;
+    if (!p) this.lastTime = performance.now();
   }
 
   public moveLane(dir: -1 | 1) {
@@ -247,7 +646,7 @@ class EnglishDashScene extends Phaser.Scene {
   public jump() {
     if (this.isPaused || this.finished) return;
     if (this.jumpY === 0) {
-      this.jumpVel = 560;
+      this.jumpVel = 12.6;
       this.slideTimer = 0;
       gameAudio.jump();
     }
@@ -255,44 +654,189 @@ class EnglishDashScene extends Phaser.Scene {
 
   public slide() {
     if (this.isPaused || this.finished) return;
-    if (this.jumpY > 0) this.jumpVel = -700;
+    if (this.jumpY > 0) this.jumpVel = -16;
     if (this.slideTimer <= 0.1) gameAudio.slide();
     this.slideTimer = 0.65;
   }
 
-  private laneX(laneIdx: number, z: number): number {
-    const cx = 450;
-    const spread = 42 + z * 215;
-    return cx + (laneIdx - 1) * spread;
+  private spawnPopup(label: string, color = '#FFD23F') {
+    const tex = makeTextTexture(label, { width: 300, height: 96, bg: 'transparent', color, fontSize: 44, maxLines: 1 });
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+    const sprite = new THREE.Sprite(mat);
+    sprite.position.set(this.playerGroup.position.x, this.jumpY + 2.55, 0);
+    sprite.scale.set(2.2, 0.72, 1);
+    this.scene.add(sprite);
+    this.popups.push({ sprite, life: 0.85 });
   }
 
-  private projY(z: number): number {
-    return 145 + Math.pow(z, 1.32) * 335;
+  private createObstacleMesh(kind: DashObject['kind'], label?: string, lane = 1): THREE.Object3D {
+    if (kind === 'barrier_low') {
+      // Red/White Subway Surfers Sawhorse Barrier — Jump over!
+      const grp = new THREE.Group();
+      const postMat = new THREE.MeshStandardMaterial({ color: 0xe11d48, roughness: 0.5 });
+      const barMat = new THREE.MeshStandardMaterial({ map: this.redStripeTex, roughness: 0.4 });
+      for (const lx of [-0.82, 0.82]) {
+        const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.08, 0.22), postMat);
+        post.position.set(lx, 0.54, 0);
+        post.castShadow = true;
+        grp.add(post);
+      }
+      const beam = new THREE.Mesh(new THREE.BoxGeometry(2.05, 0.45, 0.24), barMat);
+      beam.position.set(0, 0.82, 0);
+      beam.castShadow = true;
+      grp.add(beam);
+
+      const tag = new THREE.Sprite(
+        new THREE.SpriteMaterial({ map: makeTextTexture('JUMP ↑', { width: 220, height: 70, bg: '#9F1239', border: '#FDA4AF', fontSize: 30 }), transparent: true }),
+      );
+      tag.position.set(0, 1.45, 0);
+      tag.scale.set(1.3, 0.42, 1);
+      grp.add(tag);
+      return grp;
+    }
+
+    if (kind === 'barrier_high') {
+      // Orange Overhead Construction Beam — Slide under!
+      const grp = new THREE.Group();
+      const pillarMat = new THREE.MeshStandardMaterial({ color: 0xea580c, roughness: 0.5 });
+      const beamMat = new THREE.MeshStandardMaterial({ map: this.orangeStripeTex, roughness: 0.4 });
+      for (const lx of [-0.95, 0.95]) {
+        const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.2, 2.55, 0.24), pillarMat);
+        pillar.position.set(lx, 1.275, 0);
+        pillar.castShadow = true;
+        grp.add(pillar);
+      }
+      const overhead = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.05, 0.34), beamMat);
+      overhead.position.set(0, 1.95, 0);
+      overhead.castShadow = true;
+      grp.add(overhead);
+
+      const tag = new THREE.Sprite(
+        new THREE.SpriteMaterial({ map: makeTextTexture('SLIDE ↓', { width: 220, height: 70, bg: '#9A3412', border: '#FDBA74', fontSize: 30 }), transparent: true }),
+      );
+      tag.position.set(0, 2.85, 0);
+      tag.scale.set(1.35, 0.42, 1);
+      grp.add(tag);
+      return grp;
+    }
+
+    if (kind === 'coin') {
+      const coin = new THREE.Mesh(this.sharedCoinGeo, this.sharedCoinMat);
+      coin.rotation.z = Math.PI / 2;
+      coin.position.y = 0.95;
+      coin.castShadow = true;
+      return coin;
+    }
+
+    if (kind === 'letter') {
+      const tex = makeTextTexture(label || 'A', { width: 160, height: 160, bg: '#0E7490', border: '#22D3EE', color: '#FFFFFF', fontSize: 82 });
+      const box = new THREE.Mesh(
+        new THREE.BoxGeometry(0.85, 0.85, 0.85),
+        new THREE.MeshStandardMaterial({ map: tex, emissive: 0x06b6d4, emissiveIntensity: 0.28 }),
+      );
+      box.position.y = 1.05;
+      box.castShadow = true;
+      return box;
+    }
+
+    if (kind === 'magnet' || kind === 'shield' || kind === 'x2') {
+      const cfg =
+        kind === 'magnet'
+          ? { color: 0xec4899, text: 'MAGNET' }
+          : kind === 'shield'
+            ? { color: 0x22c55e, text: 'SHIELD' }
+            : { color: 0xa855f7, text: '2X' };
+      const grp = new THREE.Group();
+      const orb = new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.5, 0),
+        new THREE.MeshStandardMaterial({ color: cfg.color, emissive: cfg.color, emissiveIntensity: 0.45, roughness: 0.2 }),
+      );
+      orb.position.y = 1.1;
+      grp.add(orb);
+
+      const tag = new THREE.Sprite(
+        new THREE.SpriteMaterial({ map: makeTextTexture(cfg.text, { width: 220, height: 70, bg: '#0F172A', border: '#FFFFFF', fontSize: 28 }), transparent: true }),
+      );
+      tag.position.set(0, 1.95, 0);
+      tag.scale.set(1.3, 0.42, 1);
+      grp.add(tag);
+      return grp;
+    }
+
+    // Educational Answer Gate Arch
+    const palette = [
+      { frame: 0x0ea5e9, bg: '#075985', border: '#38BDF8' },
+      { frame: 0x9333ea, bg: '#581C87', border: '#C084FC' },
+      { frame: 0xec4899, bg: '#831843', border: '#F472B6' },
+    ][lane % 3];
+
+    const grp = new THREE.Group();
+    const frameMat = new THREE.MeshStandardMaterial({ color: palette.frame, emissive: palette.frame, emissiveIntensity: 0.35 });
+    for (const lx of [-1.05, 1.05]) {
+      const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.16, 2.55, 0.2), frameMat);
+      pillar.position.set(lx, 1.275, 0);
+      grp.add(pillar);
+    }
+    const topBar = new THREE.Mesh(new THREE.BoxGeometry(2.26, 0.18, 0.22), frameMat);
+    topBar.position.set(0, 2.55, 0);
+    grp.add(topBar);
+
+    const glass = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.94, 2.38),
+      new THREE.MeshBasicMaterial({ color: palette.frame, transparent: true, opacity: 0.22, side: THREE.DoubleSide }),
+    );
+    glass.position.set(0, 1.24, 0);
+    grp.add(glass);
+
+    const signTex = makeTextTexture(label || '—', {
+      width: 360,
+      height: 150,
+      bg: palette.bg,
+      border: palette.border,
+      color: '#FFFFFF',
+      fontSize: 34,
+      maxLines: 2,
+    });
+    const sign = new THREE.Mesh(new THREE.PlaneGeometry(1.95, 0.85), new THREE.MeshBasicMaterial({ map: signTex, transparent: true }));
+    sign.position.set(0, 1.55, 0.14);
+    grp.add(sign);
+
+    return grp;
   }
 
   private spawnRow() {
-    // Pause obstacle spawning while a Question Gate wave is approaching so players can focus on reading!
     if (this.activeGateQ) return;
 
     const roll = Math.random();
-    if (roll < 0.3) {
-      const safeLane = Phaser.Math.Between(0, 2);
+    if (roll < 0.34) {
+      const safeLane = Math.floor(Math.random() * 3);
       for (let l = 0; l < 3; l++) {
-        if (l === safeLane) this.objects.push({ kind: 'coin', lane: l, z: 0.03 });
-        else if (Math.random() < 0.72) this.objects.push({ kind: Math.random() < 0.35 ? 'barrier_high' : 'barrier_low', lane: l, z: 0.03 });
+        if (l === safeLane) {
+          this.addObj('coin', l, SPAWN_Z);
+        } else if (Math.random() < 0.74) {
+          this.addObj(Math.random() < 0.38 ? 'barrier_high' : 'barrier_low', l, SPAWN_Z);
+        }
       }
-    } else if (roll < 0.76) {
-      const lane = Phaser.Math.Between(0, 2);
-      this.objects.push({ kind: 'coin', lane, z: 0.03 });
-      this.objects.push({ kind: 'coin', lane, z: 0.1 });
-      if (Math.random() < 0.5 && this.letterProgress < this.targetWord.length) {
-        this.objects.push({ kind: 'letter', lane: (lane + 1) % 3, z: 0.06, label: this.targetWord[this.letterProgress] });
+    } else if (roll < 0.78) {
+      const lane = Math.floor(Math.random() * 3);
+      this.addObj('coin', lane, SPAWN_Z);
+      this.addObj('coin', lane, SPAWN_Z - 3.6);
+      this.addObj('coin', lane, SPAWN_Z - 7.2);
+      if (Math.random() < 0.55 && this.letterProgress < this.targetWord.length) {
+        this.addObj('letter', (lane + 1) % 3, SPAWN_Z - 2.0, this.targetWord[this.letterProgress]);
       }
     } else {
-      const lane = Phaser.Math.Between(0, 2);
-      const pKind = (['magnet', 'shield', 'x2'] as const)[Phaser.Math.Between(0, 2)];
-      this.objects.push({ kind: pKind, lane, z: 0.03 });
+      const lane = Math.floor(Math.random() * 3);
+      const pKind = (['magnet', 'shield', 'x2'] as const)[Math.floor(Math.random() * 3)];
+      this.addObj(pKind, lane, SPAWN_Z);
     }
+  }
+
+  private addObj(kind: DashObject['kind'], lane: number, z: number, label?: string, questionId?: string) {
+    const mesh = this.createObstacleMesh(kind, label, lane);
+    mesh.position.set(LANE_X[lane], 0, z);
+    this.scene.add(mesh);
+    this.objects.push({ kind, lane, z, label, questionId, mesh });
   }
 
   private spawnEducationalGates() {
@@ -303,49 +847,108 @@ class EnglishDashScene extends Phaser.Scene {
     this.activeGateQ = q;
     const opts = [...(q.data.options ?? [])].slice(0, 3);
     while (opts.length < 3) opts.push('—');
+
     for (let l = 0; l < 3; l++) {
-      this.objects.push({ kind: 'gate', lane: l, z: 0.02, label: opts[l], questionId: q.id });
+      this.addObj('gate', l, SPAWN_Z, opts[l], q.id);
     }
+
+    // Overhead 3D Highway Question Gantry spanning all 3 lanes
+    if (this.gateBannerMesh) {
+      this.scene.remove(this.gateBannerMesh);
+      this.gateBannerMesh = null;
+    }
+    const gantry = new THREE.Group();
+    const boardTex = makeTextTexture(q.prompt, {
+      width: 1024,
+      height: 220,
+      bg: '#0B133B',
+      border: '#38BDF8',
+      color: '#FFFFFF',
+      fontSize: 34,
+      maxLines: 3,
+    });
+    const board = new THREE.Mesh(
+      new THREE.PlaneGeometry(8.8, 1.85),
+      new THREE.MeshBasicMaterial({ map: boardTex, transparent: true }),
+    );
+    board.position.set(0, 3.85, 0);
+    gantry.add(board);
+    gantry.position.set(0, 0, SPAWN_Z);
+    this.scene.add(gantry);
+    this.gateBannerMesh = gantry;
   }
 
-  update(_time: number, deltaMs: number) {
-    if (this.isPaused || this.finished) return;
-    const dt = Math.min(0.05, deltaMs / 1000);
+  private loop = (now: number) => {
+    if (this.destroyed) return;
+    this.rafId = requestAnimationFrame(this.loop);
 
-    // Gentle speed ramp; slows slightly whenever an Answer Gate is on track so reading is effortless!
+    const deltaMs = now - this.lastTime;
+    this.lastTime = now;
+    if (!this.isPaused && !this.finished) {
+      const dt = Math.min(0.05, Math.max(0.001, deltaMs / 1000));
+      this.step(dt);
+    }
+    this.renderer.render(this.scene, this.camera);
+  };
+
+  private step(dt: number) {
+    this.runTime += dt;
+
+    // Gentle speed ramp; slows slightly during Question Gates for clear reading
     this.baseSpeed = Math.min(0.45, 0.23 + this.distance * 0.0001);
     const activeSpeed = this.activeGateQ ? Math.min(0.165, this.baseSpeed * 0.72) : this.baseSpeed;
+    const worldSpeed = activeSpeed * 84;
     const mult = this.doubleTimer > 0 ? 2 : 1;
 
     this.distance += dt * (22 + activeSpeed * 42);
     this.score += dt * 16 * mult;
 
-    // Sideway props
+    // Scroll sleepers & buildings
+    for (const s of this.sleepers) {
+      s.position.z += worldSpeed * dt;
+      if (s.position.z > 8) s.position.z -= 110.4;
+    }
+    for (const b of this.buildings) {
+      b.position.z += worldSpeed * dt * 0.9;
+      if (b.position.z > 12) b.position.z -= 117;
+    }
+
+    // Side props
     this.propTimer -= dt;
     if (this.propTimer <= 0) {
       this.propTimer = 0.55;
-      const kind = Math.random() < 0.5 ? 'lamp' : 'tree';
-      this.props.push({ side: -1, z: 0.02, kind }, { side: 1, z: 0.02, kind });
+      this.spawnSideProp(SPAWN_Z);
     }
-    for (const pr of this.props) pr.z += activeSpeed * dt * 1.15;
-    this.props = this.props.filter((pr) => pr.z < 1.18);
+    for (let i = this.props.length - 1; i >= 0; i--) {
+      const pr = this.props[i];
+      pr.z += worldSpeed * dt;
+      pr.mesh.position.z = pr.z;
+      if (pr.z > DESPAWN_Z + 4) {
+        this.scene.remove(pr.mesh);
+        this.props.splice(i, 1);
+      }
+    }
 
     // Popups
     for (let i = this.popups.length - 1; i >= 0; i--) {
       const p = this.popups[i];
       p.life -= dt;
-      p.text.y -= 45 * dt;
-      p.text.setAlpha(Math.max(0, p.life / 0.8));
+      p.sprite.position.y += 1.8 * dt;
+      (p.sprite.material as THREE.SpriteMaterial).opacity = Math.max(0, p.life / 0.85);
       if (p.life <= 0) {
-        p.text.destroy();
+        this.scene.remove(p.sprite);
         this.popups.splice(i, 1);
       }
     }
 
-    this.visualLane = Phaser.Math.Linear(this.visualLane, this.lane, Math.min(1, dt * 16));
+    // Player lane & physics
+    const prevVisual = this.visualLane;
+    this.visualLane = THREE.MathUtils.lerp(this.visualLane, this.lane, Math.min(1, dt * 14));
+    const laneDelta = (this.visualLane - prevVisual) / Math.max(dt, 0.001);
+
     if (this.jumpY > 0 || this.jumpVel !== 0) {
       this.jumpY += this.jumpVel * dt;
-      this.jumpVel -= 1540 * dt;
+      this.jumpVel -= 34 * dt;
       if (this.jumpY <= 0) {
         this.jumpY = 0;
         this.jumpVel = 0;
@@ -355,11 +958,47 @@ class EnglishDashScene extends Phaser.Scene {
     if (this.shieldTimer > 0) this.shieldTimer = Math.max(0, this.shieldTimer - dt);
     if (this.magnetTimer > 0) this.magnetTimer = Math.max(0, this.magnetTimer - dt);
     if (this.doubleTimer > 0) this.doubleTimer = Math.max(0, this.doubleTimer - dt);
+    if (this.shakeTimer > 0) this.shakeTimer = Math.max(0, this.shakeTimer - dt);
     if (this.gateFlashTimer > 0) {
       this.gateFlashTimer -= dt;
       if (this.gateFlashTimer <= 0) this.gateFlash = null;
     }
 
+    // Animate 3D player avatar
+    const px = LANE_X[0] + (this.visualLane / 2) * (LANE_X[2] - LANE_X[0]);
+    const isSliding = this.slideTimer > 0;
+    const stride = this.jumpY === 0 && !isSliding ? Math.sin(this.runTime * 15) : 0;
+
+    this.playerGroup.position.set(px, this.jumpY + (this.jumpY === 0 && !isSliding ? Math.abs(stride) * 0.08 : 0), 0);
+    this.playerGroup.rotation.z = THREE.MathUtils.clamp(-laneDelta * 0.035, -0.28, 0.28);
+
+    if (isSliding) {
+      this.playerBody.scale.set(1.06, 0.5, 1.06);
+      this.playerBody.rotation.x = 0.42;
+    } else {
+      this.playerBody.scale.set(1, 1, 1);
+      this.playerBody.rotation.x = this.jumpY > 0 ? -0.15 : 0.1;
+    }
+
+    this.leftLeg.rotation.x = this.jumpY > 0 ? 0.45 : stride * 0.85;
+    this.rightLeg.rotation.x = this.jumpY > 0 ? -0.45 : -stride * 0.85;
+    this.leftArm.rotation.x = this.jumpY > 0 ? -0.9 : -stride * 0.85;
+    this.rightArm.rotation.x = this.jumpY > 0 ? -0.9 : stride * 0.85;
+
+    this.shieldSphere.visible = this.shieldTimer > 0;
+    this.shieldSphere.rotation.y += dt * 1.8;
+    this.magnetRing.visible = this.magnetTimer > 0;
+    this.magnetRing.rotation.z += dt * 3;
+    this.x2Ring.visible = this.doubleTimer > 0;
+    this.x2Ring.rotation.z -= dt * 3;
+
+    // Camera follow & shake
+    const shakeX = this.shakeTimer > 0 ? (Math.random() - 0.5) * 0.25 : 0;
+    const shakeY = this.shakeTimer > 0 ? (Math.random() - 0.5) * 0.25 : 0;
+    this.camera.position.set(px * 0.42 + shakeX, 3.85 + this.jumpY * 0.35 + shakeY, 6.4);
+    this.camera.lookAt(px * 0.22, 1.45 + this.jumpY * 0.2, -22);
+
+    // Spawn waves & question gates
     this.spawnTimer -= dt;
     if (this.spawnTimer <= 0) {
       this.spawnTimer = 1.25;
@@ -371,21 +1010,46 @@ class EnglishDashScene extends Phaser.Scene {
       this.spawnEducationalGates();
     }
 
-    for (const obj of this.objects) {
-      obj.z += activeSpeed * dt;
-      if (this.magnetTimer > 0 && (obj.kind === 'coin' || obj.kind === 'letter') && obj.z > 0.48 && obj.z < 1.0) {
-        obj.lane = Phaser.Math.Linear(obj.lane, this.lane, dt * 10);
+    // Move & collide objects
+    for (let i = this.objects.length - 1; i >= 0; i--) {
+      const obj = this.objects[i];
+      obj.z += worldSpeed * dt;
+
+      if (this.magnetTimer > 0 && (obj.kind === 'coin' || obj.kind === 'letter') && obj.z > -38 && obj.z < 1) {
+        obj.lane = THREE.MathUtils.lerp(obj.lane, this.lane, dt * 10);
       }
-      if (!obj.hit && obj.z >= 0.88 && obj.z <= 1.03) {
-        if (Math.abs(obj.lane - this.visualLane) < 0.48) this.handleHit(obj);
+
+      const ox = LANE_X[0] + (obj.lane / 2) * (LANE_X[2] - LANE_X[0]);
+      obj.mesh.position.set(ox, obj.mesh.position.y, obj.z);
+
+      if (obj.kind === 'coin') {
+        obj.mesh.rotation.y += dt * 3.8;
+      } else if (obj.kind === 'letter' || obj.kind === 'magnet' || obj.kind === 'shield' || obj.kind === 'x2') {
+        obj.mesh.rotation.y += dt * 2.2;
+      }
+
+      if (!obj.hit && obj.z >= -0.85 && obj.z <= 0.85) {
+        if (Math.abs(obj.lane - this.visualLane) < 0.48) {
+          this.handleHit(obj);
+        }
+      }
+
+      if (obj.z > DESPAWN_Z || (obj.hit && obj.kind !== 'gate')) {
+        this.scene.remove(obj.mesh);
+        this.objects.splice(i, 1);
       }
     }
 
-    const gatesRemaining = this.objects.some((o) => o.kind === 'gate' && o.z <= 1.05);
-    if (!gatesRemaining && this.activeGateQ) this.activeGateQ = null;
-    this.objects = this.objects.filter((o) => o.z < 1.15 && !(o.hit && o.kind !== 'gate'));
+    if (this.gateBannerMesh) {
+      this.gateBannerMesh.position.z += worldSpeed * dt;
+      if (this.gateBannerMesh.position.z > DESPAWN_Z || !this.activeGateQ) {
+        this.scene.remove(this.gateBannerMesh);
+        this.gateBannerMesh = null;
+      }
+    }
 
-    this.renderScene();
+    const gatesRemaining = this.objects.some((o) => o.kind === 'gate' && o.z <= 1.2);
+    if (!gatesRemaining && this.activeGateQ) this.activeGateQ = null;
 
     this.hudTick += dt;
     if (this.hudTick >= 0.1) {
@@ -394,17 +1058,16 @@ class EnglishDashScene extends Phaser.Scene {
     }
   }
 
-  private handleHit(obj: (typeof this.objects)[number]) {
+  private handleHit(obj: DashObject) {
     obj.hit = true;
     const mult = this.doubleTimer > 0 ? 2 : 1;
-    const px = this.laneX(this.visualLane, 0.94);
 
     if (obj.kind === 'coin') {
       this.coins += 1;
       const pts = 20 * mult;
       this.score += pts;
       gameAudio.coin();
-      this.spawnPopup(px, 390, `+${pts}`, '#FFD23F');
+      this.spawnPopup(`+${pts}`, '#FFD23F');
       return;
     }
     if (obj.kind === 'letter') {
@@ -412,14 +1075,14 @@ class EnglishDashScene extends Phaser.Scene {
       gameAudio.letter();
       if (obj.label === this.targetWord[this.letterProgress]) {
         this.letterProgress++;
-        this.spawnPopup(px, 370, `${obj.label}!`, '#00D1FF');
+        this.spawnPopup(`${obj.label}!`, '#00D1FF');
         if (this.letterProgress >= this.targetWord.length) {
           this.score += 250 * mult;
           this.coins += 15;
           gameAudio.victory();
           this.gateFlash = { text: `Word "${this.targetWord}" Complete! +${250 * mult}`, good: true };
           this.gateFlashTimer = 2.0;
-          this.spawnPopup(px, 335, `WORD +${250 * mult}!`, '#22C55E');
+          this.spawnPopup(`WORD +${250 * mult}!`, '#22C55E');
           this.wordIdx++;
           this.targetWord = TARGET_WORDS[this.wordIdx % TARGET_WORDS.length];
           this.letterProgress = 0;
@@ -430,23 +1093,23 @@ class EnglishDashScene extends Phaser.Scene {
     if (obj.kind === 'magnet') {
       this.magnetTimer = 8;
       gameAudio.powerup();
-      this.spawnPopup(px, 370, 'MAGNET!', '#EC4899');
+      this.spawnPopup('MAGNET!', '#EC4899');
       return;
     }
     if (obj.kind === 'shield') {
       this.shieldTimer = 10;
       gameAudio.powerup();
-      this.spawnPopup(px, 370, 'SHIELD!', '#22C55E');
+      this.spawnPopup('SHIELD!', '#22C55E');
       return;
     }
     if (obj.kind === 'x2') {
       this.doubleTimer = 8;
       gameAudio.powerup();
-      this.spawnPopup(px, 370, '2X BOOST!', '#A855F7');
+      this.spawnPopup('2X BOOST!', '#A855F7');
       return;
     }
     if (obj.kind === 'barrier_low') {
-      if (this.jumpY > 36) return;
+      if (this.jumpY > 0.72) return;
       this.takeDamage();
       return;
     }
@@ -464,7 +1127,7 @@ class EnglishDashScene extends Phaser.Scene {
       gameAudio.correct();
       this.gateFlash = { text: `Gate "${obj.label}" Picked! +${pts}`, good: true };
       this.gateFlashTimer = 1.6;
-      this.spawnPopup(px, 345, `+${pts}`, '#00D1FF');
+      this.spawnPopup(`+${pts}`, '#00D1FF');
       this.activeGateQ = null;
     }
   }
@@ -475,273 +1138,20 @@ class EnglishDashScene extends Phaser.Scene {
       this.gateFlash = { text: 'Shield Saved You!', good: true };
       this.gateFlashTimer = 1.4;
       gameAudio.powerup();
+      this.spawnPopup('SAVED!', '#22C55E');
       return;
     }
     this.lives -= 1;
     this.combo = 0;
+    this.shakeTimer = 0.25;
     gameAudio.hit();
-    this.cameras.main.shake(180, 0.015);
+    this.spawnPopup('-1 ❤️', '#FB7185');
     if (this.lives <= 0) {
       this.finished = true;
       gameAudio.gameOver();
       this.pushHud();
       this.cb.onGameOver({ score: Math.round(this.score), distance: Math.round(this.distance), coins: this.coins });
     }
-  }
-
-  private renderScene() {
-    const g = this.g;
-    g.clear();
-
-    // 1. Vibrant Casual-Mobile Sunset-Cyber Sky + Fluffy Clouds + City Skyline
-    g.fillGradientStyle(0x162266, 0x162266, 0x7c3aed, 0xec4899, 1);
-    g.fillRect(0, 0, 900, 150);
-
-    // Glowing sun & clouds
-    g.fillStyle(0xffd23f, 0.25);
-    g.fillCircle(450, 128, 74);
-    g.fillStyle(0xff8a3d, 0.5);
-    g.fillCircle(450, 128, 44);
-    g.fillStyle(0xffffff, 0.22);
-    [
-      [130, 54],
-      [310, 38],
-      [630, 48],
-      [780, 62],
-    ].forEach(([cx, cy]) => {
-      g.fillCircle(cx, cy, 22);
-      g.fillCircle(cx + 18, cy + 4, 16);
-      g.fillCircle(cx - 18, cy + 5, 15);
-    });
-
-    // Colorful layered city skyline
-    [20, 88, 154, 228, 595, 668, 740, 818].forEach((bx, i) => {
-      const bh = 46 + ((i * 27) % 52);
-      g.fillStyle(i % 2 === 0 ? 0x1d1b5e : 0x281e70, 1);
-      g.fillRoundedRect(bx, 145 - bh, 56, bh + 4, 4);
-      g.fillStyle(i % 2 === 0 ? 0x4fc3ff : 0xffd23f, 0.55);
-      for (let wy = 145 - bh + 10; wy < 134; wy += 16) {
-        g.fillRect(bx + 10, wy, 9, 8);
-        g.fillRect(bx + 32, wy, 9, 8);
-      }
-    });
-
-    // 2. Green/Teal Sidewalk Embankments + Asphalt Subway Track
-    g.fillGradientStyle(0x1b4332, 0x1b4332, 0x0f2922, 0x0f2922, 1);
-    g.fillRect(0, 145, 900, 375);
-
-    // Side track neon curb
-    g.fillStyle(0x334155, 1);
-    g.beginPath();
-    g.moveTo(372, 145);
-    g.lineTo(528, 145);
-    g.lineTo(860, 520);
-    g.lineTo(40, 520);
-    g.closePath();
-    g.fillPath();
-
-    // Main track bed
-    g.fillStyle(0x1e295b, 1);
-    g.beginPath();
-    g.moveTo(388, 145);
-    g.lineTo(512, 145);
-    g.lineTo(820, 520);
-    g.lineTo(80, 520);
-    g.closePath();
-    g.fillPath();
-
-    // Alternating track sleepers (ties) for crisp motion depth
-    const tieOffset = (this.distance * 0.085) % 1;
-    for (let i = 0; i < 9; i++) {
-      const z = (i + tieOffset) / 9;
-      const y = this.projY(z);
-      const half = 60 + Math.pow(z, 1.32) * 305;
-      g.lineStyle(Math.max(2, 5 * z), 0x475569, 0.55);
-      g.lineBetween(450 - half, y, 450 + half, y);
-    }
-
-    // Bright steel/neon subway rails per lane
-    g.lineStyle(4, 0x00d1ff, 0.9);
-    g.lineBetween(388, 145, 80, 520);
-    g.lineBetween(512, 145, 820, 520);
-    g.lineStyle(3, 0xffd23f, 0.75);
-    g.lineBetween(429, 145, 325, 520);
-    g.lineBetween(471, 145, 575, 520);
-
-    // Roadside lampposts & palm trees
-    for (const pr of [...this.props].sort((a, b) => a.z - b.z)) {
-      const y = this.projY(pr.z);
-      const scale = 0.25 + pr.z * 0.95;
-      const edgeOffset = 82 + Math.pow(pr.z, 1.32) * 340;
-      const px = 450 + pr.side * edgeOffset;
-      if (pr.kind === 'lamp') {
-        g.fillStyle(0x94a3b8, 1);
-        g.fillRect(px - 3 * scale, y - 85 * scale, 6 * scale, 85 * scale);
-        g.fillStyle(0xffd23f, 0.9);
-        g.fillCircle(px - pr.side * 10 * scale, y - 85 * scale, 9 * scale);
-      } else {
-        g.fillStyle(0x78350f, 1);
-        g.fillRect(px - 5 * scale, y - 62 * scale, 10 * scale, 62 * scale);
-        g.fillStyle(0x22c55e, 1);
-        g.fillCircle(px, y - 68 * scale, 22 * scale);
-        g.fillStyle(0x4ade80, 1);
-        g.fillCircle(px - 10 * scale, y - 74 * scale, 14 * scale);
-      }
-    }
-
-    // 3. Draw Track Objects far-to-near
-    for (const gt of this.gateTexts) gt.setVisible(false);
-    for (const it of this.itemTexts) it.setVisible(false);
-    this.gateBannerText.setVisible(false);
-    let gtIdx = 0;
-    let itIdx = 0;
-
-    // Find current gate wave z so we can draw the connected Overhead Question Signboard right above the 3 gate boxes!
-    const activeGates = this.objects.filter((o) => o.kind === 'gate');
-    let gantryDrawn = false;
-
-    const sorted = [...this.objects].sort((a, b) => a.z - b.z);
-    const gateStyles = [
-      { fill: 0x0284c7, border: 0x38bdf8 },
-      { fill: 0x7c3aed, border: 0xc084fc },
-      { fill: 0xdb2777, border: 0xf472b6 },
-    ];
-
-    for (const obj of sorted) {
-      const x = this.laneX(obj.lane, obj.z);
-      const y = this.projY(obj.z);
-      const scale = 0.25 + obj.z * 0.95;
-
-      // Draw Question Highway Gantry right above the 3 gates before drawing the gate boxes
-      if (obj.kind === 'gate' && !gantryDrawn && this.activeGateQ && activeGates.length > 0) {
-        gantryDrawn = true;
-        const gz = activeGates[0].z;
-        const gy = this.projY(gz);
-        const gScale = 0.25 + gz * 0.95;
-        const leftX = this.laneX(0, gz);
-        const rightX = this.laneX(2, gz);
-        const spanW = Math.max(320, rightX - leftX + 165 * gScale);
-        const boxH = 82 * gScale;
-        const boardH = Math.max(48, 66 * gScale);
-        const boardY = Math.max(46, gy - boxH - boardH - 12 * gScale);
-
-        // Support pillars connecting the Question Signboard down to the 3 gates
-        g.fillStyle(0x94a3b8, 0.9);
-        g.fillRect(leftX - 55 * gScale, boardY + boardH, 8 * gScale, gy - (boardY + boardH));
-        g.fillRect(rightX + 47 * gScale, boardY + boardH, 8 * gScale, gy - (boardY + boardH));
-
-        // Glossy Question Board right above the 3 answer boxes!
-        g.fillStyle(0x0b1033, 0.94);
-        g.lineStyle(3.5, 0xffd23f, 0.95);
-        g.fillRoundedRect(450 - spanW / 2, boardY, spanW, boardH, 14);
-        g.strokeRoundedRect(450 - spanW / 2, boardY, spanW, boardH, 14);
-
-        this.gateBannerText.setPosition(450, boardY + boardH / 2);
-        this.gateBannerText.setText(this.activeGateQ.prompt.replace(/\*\*/g, ''));
-        this.gateBannerText.setScale(Math.max(0.76, Math.min(1.05, 0.68 + gz * 0.42)));
-        this.gateBannerText.setVisible(true);
-      }
-
-      if (obj.kind === 'gate') {
-        const w = 136 * scale;
-        const h = 82 * scale;
-        const st = gateStyles[obj.lane % 3];
-        g.fillStyle(st.fill, 0.72);
-        g.lineStyle(3.5 * scale + 1, st.border, 1);
-        g.fillRoundedRect(x - w / 2, y - h, w, h, 12 * scale);
-        g.strokeRoundedRect(x - w / 2, y - h, w, h, 12 * scale);
-        // Gloss top strip
-        g.fillStyle(0xffffff, 0.18);
-        g.fillRoundedRect(x - w / 2 + 4 * scale, y - h + 4 * scale, w - 8 * scale, 12 * scale, 6 * scale);
-        if (gtIdx < this.gateTexts.length && obj.z > 0.06) {
-          const t = this.gateTexts[gtIdx++];
-          t.setPosition(x, y - h / 2);
-          t.setText(obj.label ?? '');
-          t.setScale(Math.max(0.55, scale));
-          t.setVisible(true);
-        }
-      } else if (obj.kind === 'barrier_low') {
-        const w = 112 * scale;
-        const h = 44 * scale;
-        // Striped Subway Roadblock
-        g.fillStyle(0xdc2626, 1);
-        g.fillRoundedRect(x - w / 2, y - h, w, h, 8 * scale);
-        g.fillStyle(0xfacc15, 1);
-        g.fillRect(x - w / 2 + 6 * scale, y - h + 8 * scale, w - 12 * scale, 10 * scale);
-        g.fillStyle(0x1e293b, 1);
-        g.fillRect(x - w / 2 + 12 * scale, y - 10 * scale, 14 * scale, 10 * scale);
-        g.fillRect(x + w / 2 - 26 * scale, y - 10 * scale, 14 * scale, 10 * scale);
-      } else if (obj.kind === 'barrier_high') {
-        const w = 122 * scale;
-        const barY = y - 92 * scale;
-        g.fillStyle(0x64748b, 1);
-        g.fillRect(x - w / 2, barY, 9 * scale, 92 * scale);
-        g.fillRect(x + w / 2 - 9 * scale, barY, 9 * scale, 92 * scale);
-        g.fillStyle(0xf97316, 1);
-        g.fillRoundedRect(x - w / 2, barY, w, 28 * scale, 7 * scale);
-        g.fillStyle(0xfef08a, 1);
-        g.fillRect(x - w / 2 + 10 * scale, barY + 9 * scale, w - 20 * scale, 8 * scale);
-      } else if (obj.kind === 'coin') {
-        g.fillStyle(0xffd23f, 1);
-        g.fillCircle(x, y - 22 * scale, 15 * scale);
-        g.lineStyle(2.5, 0xd97706, 1);
-        g.strokeCircle(x, y - 22 * scale, 15 * scale);
-        g.fillStyle(0xffffff, 0.7);
-        g.fillCircle(x - 4 * scale, y - 27 * scale, 4 * scale);
-      } else if (obj.kind === 'letter') {
-        g.fillStyle(0x00d1ff, 1);
-        g.fillRoundedRect(x - 18 * scale, y - 40 * scale, 36 * scale, 36 * scale, 9 * scale);
-        g.lineStyle(2.5, 0xffffff, 0.95);
-        g.strokeRoundedRect(x - 18 * scale, y - 40 * scale, 36 * scale, 36 * scale, 9 * scale);
-        if (itIdx < this.itemTexts.length) {
-          const t = this.itemTexts[itIdx++];
-          t.setPosition(x, y - 22 * scale);
-          t.setText(obj.label ?? 'A');
-          t.setScale(Math.max(0.5, scale));
-          t.setVisible(true);
-        }
-      } else {
-        const col = obj.kind === 'shield' ? 0x22c55e : obj.kind === 'magnet' ? 0xec4899 : 0x7c5cff;
-        g.fillStyle(col, 1);
-        g.fillCircle(x, y - 26 * scale, 19 * scale);
-        g.lineStyle(2.5, 0xffffff, 0.9);
-        g.strokeCircle(x, y - 26 * scale, 19 * scale);
-        if (itIdx < this.itemTexts.length) {
-          const t = this.itemTexts[itIdx++];
-          t.setPosition(x, y - 26 * scale);
-          t.setText(obj.kind === 'shield' ? '🛡️' : obj.kind === 'magnet' ? '🧲' : '2x');
-          t.setScale(Math.max(0.5, scale));
-          t.setVisible(true);
-        }
-      }
-    }
-
-    // 4. Draw Player's Customized Shop Avatar!
-    const px = this.laneX(this.visualLane, 0.94);
-    const groundY = this.projY(0.94);
-    const py = groundY - this.jumpY;
-    const isSliding = this.slideTimer > 0;
-    const stride = this.jumpY > 0 ? 0 : Math.sin(this.distance * 0.45) * 9;
-
-    g.fillStyle(0x000000, 0.38);
-    g.fillEllipse(px, groundY + 6, Math.max(22, (isSliding ? 56 : 44) - this.jumpY * 0.14), 11);
-
-    if (this.shieldTimer > 0) {
-      g.lineStyle(3.5, 0x22c55e, 0.9);
-      g.fillStyle(0x22c55e, 0.18);
-      g.fillCircle(px, py - 42, 50);
-      g.strokeCircle(px, py - 42, 50);
-    }
-
-    drawPhaserAvatar(g, {
-      x: px,
-      y: py,
-      avatar: this.avatar,
-      scale: 1.28,
-      stride,
-      sliding: isSliding,
-      view: 'back',
-    });
   }
 
   private pushHud() {
@@ -760,12 +1170,26 @@ class EnglishDashScene extends Phaser.Scene {
       gateFlash: this.gateFlash,
     });
   }
+
+  public destroy() {
+    this.destroyed = true;
+    cancelAnimationFrame(this.rafId);
+    this.resizeObs?.disconnect();
+    window.removeEventListener('keydown', this.onKeyDownBound);
+    this.renderer.domElement.removeEventListener('pointerdown', this.onPointerDownBound);
+    this.renderer.domElement.removeEventListener('pointerup', this.onPointerUpBound);
+    this.redStripeTex.dispose();
+    this.orangeStripeTex.dispose();
+    this.sharedCoinGeo.dispose();
+    this.sharedCoinMat.dispose();
+    this.renderer.dispose();
+    this.container.innerHTML = '';
+  }
 }
 
 export function EnglishDashGame() {
   const mountRef = useRef<HTMLDivElement>(null);
-  const gameRef = useRef<Phaser.Game | null>(null);
-  const sceneRef = useRef<EnglishDashScene | null>(null);
+  const engineRef = useRef<EnglishDash3DEngine | null>(null);
 
   const [state, setState] = useState<GameState>('MENU');
   const [avatar, setAvatar] = useState<AvatarConfig | null>(null);
@@ -791,25 +1215,10 @@ export function EnglishDashGame() {
     void api.get<{ avatar: AvatarConfig }>('/avatar').then((r) => setAvatar(r.avatar)).catch(() => undefined);
     return () => {
       gameAudio.stopMusic();
-      gameRef.current?.destroy(true);
-      gameRef.current = null;
+      engineRef.current?.destroy();
+      engineRef.current = null;
     };
   }, []);
-
-  // Prevent browser window from scrolling when pressing arrow keys or space during gameplay
-  useEffect(() => {
-    if (state !== 'PLAYING') return;
-    const preventScroll = (e: KeyboardEvent) => {
-      const keysToBlock = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'];
-      if (keysToBlock.includes(e.code) || ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) {
-        e.preventDefault();
-      }
-    };
-    window.addEventListener('keydown', preventScroll, { passive: false });
-    return () => {
-      window.removeEventListener('keydown', preventScroll);
-    };
-  }, [state]);
 
   const startRun = useCallback(async () => {
     setState('LOADING');
@@ -821,12 +1230,13 @@ export function EnglishDashGame() {
         gameSlug: 'english-dash',
       });
 
-      if (gameRef.current) {
-        gameRef.current.destroy(true);
-        gameRef.current = null;
+      if (engineRef.current) {
+        engineRef.current.destroy();
+        engineRef.current = null;
       }
 
-      const scene = new EnglishDashScene(
+      engineRef.current = new EnglishDash3DEngine(
+        mountRef.current!,
         startRes.questions,
         {
           onHud: (next) => setHud(next),
@@ -839,17 +1249,7 @@ export function EnglishDashGame() {
         },
         avatar,
       );
-      sceneRef.current = scene;
 
-      gameRef.current = new Phaser.Game({
-        type: Phaser.AUTO,
-        parent: mountRef.current!,
-        width: 900,
-        height: 520,
-        backgroundColor: '#162266',
-        scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
-        scene: [scene],
-      });
       gameAudio.startMusic('dash');
       setState('PLAYING');
     } catch (e) {
@@ -876,11 +1276,11 @@ export function EnglishDashGame() {
 
   const togglePause = () => {
     if (state === 'PLAYING') {
-      sceneRef.current?.setPaused(true);
+      engineRef.current?.setPaused(true);
       gameAudio.stopMusic();
       setState('PAUSED');
     } else if (state === 'PAUSED') {
-      sceneRef.current?.setPaused(false);
+      engineRef.current?.setPaused(false);
       gameAudio.startMusic('dash');
       setState('PLAYING');
     }
@@ -889,7 +1289,7 @@ export function EnglishDashGame() {
   return (
     <div className="mx-auto max-w-5xl">
       <GameHudBar
-        title="English Dash"
+        title="English Dash 3D"
         state={state}
         score={hud.score}
         streak={hud.combo}
@@ -943,26 +1343,26 @@ export function EnglishDashGame() {
             {hud.gateFlash.text}
           </span>
         ) : (
-          <span className="text-xs text-white/75">←/→ Lane · ↑ Jump · ↓ Slide · Questions appear right above the 3 gates!</span>
+          <span className="text-xs text-white/75">←/→ Lane · ↑ Jump · ↓ Slide · Questions appear right above the 3D gates!</span>
         )}
       </div>
 
-      {/* Phaser Canvas Container */}
-      <div className="relative overflow-hidden rounded-3xl border border-white/20 bg-[#162266] shadow-2xl no-touch-callout">
+      {/* 3D WebGL Canvas Container */}
+      <div className="relative overflow-hidden rounded-3xl border border-white/20 bg-[#1B1464] shadow-2xl no-touch-callout">
         <div ref={mountRef} className="aspect-[900/520] w-full" />
         <GameOverlayModal
           state={state}
-          title="English Dash"
-          subtitle="Run with your customized avatar down neon subway rails! Read the question right above the 3 answer gates and steer into the right lane!"
+          title="English Dash 3D"
+          subtitle="Sprint in full 3D down neon subway rails with your customized avatar! Dodge 3D barriers, collect letters, and steer into the right 3D Answer Gate!"
           result={result}
           onStart={() => void startRun()}
           onResume={togglePause}
           onRestart={() => void startRun()}
           menuExtra={
             <div className="rounded-2xl bg-white/10 p-3.5 text-xs space-y-1.5 text-white/85">
-              <p>• <strong>← / →</strong> or <strong>Swipe</strong>: Switch lanes & choose the right Answer Gate</p>
-              <p>• <strong>↑ / Space</strong>: Jump over red barriers</p>
-              <p>• <strong>↓</strong>: Slide under orange overhead beams</p>
+              <p>• <strong>← / →</strong> or <strong>Swipe</strong>: Switch lanes & choose the right 3D Answer Gate</p>
+              <p>• <strong>↑ / Space</strong>: Jump over red 3D barriers</p>
+              <p>• <strong>↓</strong>: Slide under orange 3D overhead beams</p>
             </div>
           }
         />
@@ -971,16 +1371,16 @@ export function EnglishDashGame() {
       {/* Touch Controls */}
       {state === 'PLAYING' && (
         <div className="mt-4 grid grid-cols-4 gap-2 sm:hidden">
-          <button onClick={() => sceneRef.current?.moveLane(-1)} className="btn-game bg-white/15 py-3" aria-label="Move Left">
+          <button onClick={() => engineRef.current?.moveLane(-1)} className="btn-game bg-white/15 py-3" aria-label="Move Left">
             <ArrowLeft className="h-5 w-5" />
           </button>
-          <button onClick={() => sceneRef.current?.jump()} className="btn-game bg-game-sky text-navy-950 py-3" aria-label="Jump">
+          <button onClick={() => engineRef.current?.jump()} className="btn-game bg-game-sky text-navy-950 py-3" aria-label="Jump">
             <ArrowUp className="h-5 w-5" />
           </button>
-          <button onClick={() => sceneRef.current?.slide()} className="btn-game bg-game-grape py-3" aria-label="Slide">
+          <button onClick={() => engineRef.current?.slide()} className="btn-game bg-game-grape py-3" aria-label="Slide">
             <ArrowDown className="h-5 w-5" />
           </button>
-          <button onClick={() => sceneRef.current?.moveLane(1)} className="btn-game bg-white/15 py-3" aria-label="Move Right">
+          <button onClick={() => engineRef.current?.moveLane(1)} className="btn-game bg-white/15 py-3" aria-label="Move Right">
             <ArrowRight className="h-5 w-5" />
           </button>
         </div>
