@@ -23,7 +23,7 @@ interface DashCallbacks {
     collectedLetters: string;
     gateFlash: { text: string; good: boolean } | null;
   }) => void;
-  onAnswer: (questionId: string, response: string) => void;
+  onAnswer: (questionId: string, response: string) => Promise<{ isCorrect: boolean; correctAnswer?: string | string[] }>;
   onGameOver: (stats: { score: number; distance: number; coins: number }) => void;
 }
 
@@ -1158,15 +1158,30 @@ class EnglishDash3DEngine {
     }
     if (obj.kind === 'gate' && obj.questionId && obj.label) {
       for (const g of this.objects) if (g.kind === 'gate' && g.questionId === obj.questionId) g.hit = true;
-      this.cb.onAnswer(obj.questionId, obj.label);
-      this.combo += 1;
-      const pts = 100 * mult;
-      this.score += pts;
-      gameAudio.correct();
-      this.gateFlash = { text: `Gate "${obj.label}" Picked! +${pts}`, good: true };
-      this.gateFlashTimer = 1.6;
-      this.spawnPopup(`+${pts}`, '#00D1FF');
+      const pickedLabel = obj.label;
       this.activeGateQ = null;
+      void this.cb.onAnswer(obj.questionId, pickedLabel).then((res) => {
+        if (this.destroyed || this.finished) return;
+        if (res.isCorrect) {
+          this.combo += 1;
+          const pts = 100 * mult;
+          this.score += pts;
+          gameAudio.correct();
+          this.gateFlash = { text: `Benar! "${pickedLabel}" (+${pts} pts)`, good: true };
+          this.gateFlashTimer = 1.8;
+          this.spawnPopup(`+${pts}`, '#22C55E');
+        } else {
+          this.combo = 0;
+          const penalty = 50;
+          this.score = Math.max(0, this.score - penalty);
+          this.shakeTimer = 0.25;
+          gameAudio.hit();
+          this.gateFlash = { text: `Salah! "${pickedLabel}" (-${penalty} pts)`, good: false };
+          this.gateFlashTimer = 1.8;
+          this.spawnPopup(`-${penalty}`, '#FB7185');
+        }
+        this.pushHud();
+      });
     }
   }
 
@@ -1278,7 +1293,17 @@ export function EnglishDashGame() {
         startRes.questions,
         {
           onHud: (next) => setHud(next),
-          onAnswer: (questionId, response) => answersRef.current.push({ questionId, response }),
+          onAnswer: async (questionId, response) => {
+            answersRef.current.push({ questionId, response });
+            try {
+              return await api.post<{ isCorrect: boolean; correctAnswer?: string | string[] }>(
+                `/games/sessions/${startRes.sessionId}/check`,
+                { questionId, response },
+              );
+            } catch {
+              return { isCorrect: false };
+            }
+          },
           onGameOver: (stats) => {
             gameAudio.stopMusic();
             setState('GAME_OVER');

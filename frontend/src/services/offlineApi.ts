@@ -132,6 +132,17 @@ const OFFLINE_QUESTIONS: PublicQuestion[] = [
   },
 ];
 
+const OFFLINE_ANSWERS: Record<string, string> = {
+  'off-q1': 'at',
+  'off-q2': 'has lived',
+  'off-q3': 'adaptable',
+  'off-q4': 'but',
+  'off-q5': 'I am writing to inquire',
+  'off-q6': 'went',
+  'off-q7': 'Good luck!',
+  'off-q8': 'an',
+};
+
 function getStoredUsers(): StoredUser[] {
   try {
     const raw = localStorage.getItem(USERS_KEY);
@@ -352,6 +363,17 @@ export function handleOfflineRequest<T>(method: string, path: string, body?: unk
       sessionId: `offline-session-${Date.now()}`,
       questions: OFFLINE_QUESTIONS,
     } as T;
+  }
+
+  // Game single-answer real-time check
+  if (method === 'POST' && path.startsWith('/games/sessions/') && path.endsWith('/check')) {
+    const { questionId, response } = (body ?? {}) as { questionId?: string; response?: string };
+    const correctAnswer = questionId ? OFFLINE_ANSWERS[questionId] : undefined;
+    const isCorrect =
+      typeof response === 'string' &&
+      typeof correctAnswer === 'string' &&
+      response.trim().toLowerCase() === correctAnswer.trim().toLowerCase();
+    return { questionId, isCorrect, correctAnswer } as T;
   }
 
   // Game session finish

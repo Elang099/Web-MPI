@@ -126,6 +126,22 @@ router.post(
   }),
 );
 
+/** POST /api/games/sessions/:id/check — checks a single answer in real-time during gameplay */
+router.post(
+  '/sessions/:id/check',
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const { questionId, response } = req.body as { questionId?: string; response?: string | string[] };
+    if (!questionId || response === undefined) throw badRequest('questionId and response required');
+    const session = await prisma.gameSession.findUnique({ where: { id: String(req.params.id) } });
+    if (!session) throw notFound('Game session');
+    if (session.userId !== userId) throw forbidden();
+    const q = await prisma.question.findUnique({ where: { id: questionId } });
+    if (!q) throw notFound('Question');
+    res.json(grade(q, response));
+  }),
+);
+
 /** POST /api/games/sessions/:id/finish — grades answers server-side, prevents tampering & caps daily XP */
 router.post(
   '/sessions/:id/finish',
